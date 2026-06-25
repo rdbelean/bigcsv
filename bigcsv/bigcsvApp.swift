@@ -38,6 +38,17 @@ struct bigcsvApp: App {
                     .keyboardShortcut("l", modifiers: .command)
                     .disabled(appModel.document == nil)
             }
+            CommandGroup(after: .textEditing) {
+                Button("Find…") { appModel.document?.findBarVisible = true }
+                    .keyboardShortcut("f", modifiers: .command)
+                    .disabled(appModel.document == nil)
+                Button("Find Next") { appModel.document?.nextMatch() }
+                    .keyboardShortcut("g", modifiers: .command)
+                    .disabled(appModel.document?.matchRows.isEmpty ?? true)
+                Button("Find Previous") { appModel.document?.previousMatch() }
+                    .keyboardShortcut("g", modifiers: [.command, .shift])
+                    .disabled(appModel.document?.matchRows.isEmpty ?? true)
+            }
         }
     }
 }

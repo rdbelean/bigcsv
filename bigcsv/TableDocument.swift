@@ -29,10 +29,20 @@ final class TableDocument: ObservableObject {
     /// Display row whose full contents should be shown in the inspector, if any.
     @Published var inspectedRow: Int?
 
+    // Search
+    @Published var searchQuery = ""
+    @Published var searchCaseSensitive = false
+    @Published var findBarVisible = false
+    @Published private(set) var matchRows: [Int] = []     // display rows containing a match
+    @Published var currentMatchIndex = 0
+    @Published private(set) var isSearching = false
+
     /// Invoked (coalesced by the table view) whenever the indexed row count grows.
     var onIndexUpdate: (() -> Void)?
     /// Set by the table view; asks it to scroll a display row into view.
     var onScrollToRow: ((Int) -> Void)?
+    /// Set by the table view; asks it to repaint visible rows (search highlights).
+    var onSearchChanged: (() -> Void)?
 
     private(set) var index: RecordIndex
     private let securityScoped: Bool
@@ -40,6 +50,8 @@ final class TableDocument: ObservableObject {
     private var columnsComputed = false
     private var fileWatchSource: DispatchSourceFileSystemObject?
     private var watchFD: Int32 = -1
+    private var searchTask: Task<Void, Never>?
+    private var didJumpToFirstMatch = false
 
     // Small LRU of parsed rows so all columns of a visible row parse once.
     private var rowCache: [Int: [String]] = [:]
@@ -221,6 +233,79 @@ final class TableDocument: ObservableObject {
         inspectedRow = displayRow
     }
 
+    // MARK: Search
+
+    /// (Re)run the search for the current `searchQuery`. Streams matching display
+    /// rows in as they're found, off-main, cancellable.
+    func performSearch() {
+        searchTask?.cancel()
+        matchRows = []
+        currentMatchIndex = 0
+        didJumpToFirstMatch = false
+        onSearchChanged?()
+
+        let query = searchQuery
+        guard !query.isEmpty else { isSearching = false; return }
+        isSearching = true
+
+        let mapper = self.mapper
+        let index = self.index
+        let dialect = self.dialect
+        let caseSensitive = self.searchCaseSensitive
+        let hasHeader = dialect.hasHeader
+        let buffer = MatchBuffer()
+
+        searchTask = Task {
+            await SearchEngine().search(
+                mapper: mapper, index: index, dialect: dialect,
+                query: query, caseSensitive: caseSensitive,
+                onMatch: { record in
+                    let displayRow = hasHeader ? record - 1 : record
+                    if displayRow >= 0 { buffer.append(displayRow) }
+                },
+                onProgress: { _, _, isComplete in
+                    Task { @MainActor [weak self] in self?.flushSearch(buffer, isComplete: isComplete) }
+                })
+        }
+    }
+
+    private func flushSearch(_ buffer: MatchBuffer, isComplete: Bool) {
+        let new = buffer.drainNew()
+        if !new.isEmpty { matchRows.append(contentsOf: new) }
+        if isComplete { isSearching = false }
+        if !didJumpToFirstMatch, let first = matchRows.first {
+            didJumpToFirstMatch = true
+            currentMatchIndex = 0
+            requestScrollToRow(first)
+        }
+        onSearchChanged?()
+    }
+
+    func nextMatch() {
+        guard !matchRows.isEmpty else { return }
+        currentMatchIndex = (currentMatchIndex + 1) % matchRows.count
+        requestScrollToRow(matchRows[currentMatchIndex])
+        onSearchChanged?()
+    }
+
+    func previousMatch() {
+        guard !matchRows.isEmpty else { return }
+        currentMatchIndex = (currentMatchIndex - 1 + matchRows.count) % matchRows.count
+        requestScrollToRow(matchRows[currentMatchIndex])
+        onSearchChanged?()
+    }
+
+    func clearSearch() {
+        searchTask?.cancel()
+        searchTask = nil
+        searchQuery = ""
+        matchRows = []
+        currentMatchIndex = 0
+        isSearching = false
+        didJumpToFirstMatch = false
+        onSearchChanged?()
+    }
+
     // MARK: File-change watch (guards against SIGBUS on truncation/replacement)
 
     private func startWatchingFile() {
@@ -251,6 +336,8 @@ final class TableDocument: ObservableObject {
     func close() {
         indexTask?.cancel()
         indexTask = nil
+        searchTask?.cancel()
+        searchTask = nil
         stopWatchingFile()
         if securityScoped {
             fileURL.stopAccessingSecurityScopedResource()
@@ -261,5 +348,25 @@ final class TableDocument: ObservableObject {
         if securityScoped {
             fileURL.stopAccessingSecurityScopedResource()
         }
+    }
+}
+
+/// Thread-safe accumulator the off-main search appends to; the main actor drains
+/// the new entries periodically.
+private nonisolated final class MatchBuffer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var items: [Int] = []
+    private var drained = 0
+
+    func append(_ row: Int) {
+        lock.lock(); items.append(row); lock.unlock()
+    }
+
+    func drainNew() -> [Int] {
+        lock.lock(); defer { lock.unlock() }
+        guard drained < items.count else { return [] }
+        let new = Array(items[drained...])
+        drained = items.count
+        return new
     }
 }

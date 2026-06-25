@@ -50,6 +50,10 @@ struct DocumentView: View {
             if document.fileChangedExternally {
                 FileChangedBanner { appModel.reopenCurrent() }
             }
+            if document.findBarVisible {
+                FindBar(document: document)
+                Divider()
+            }
             if let unsupported = document.unsupportedEncoding {
                 UnsupportedEncodingView(encoding: unsupported,
                                         fileName: document.fileURL.lastPathComponent)
@@ -70,6 +74,58 @@ struct DocumentView: View {
                 RowInspectorView(document: document, displayRow: row)
             }
         }
+    }
+}
+
+/// Find bar (⌘F): live full-text search with match count and next/prev.
+struct FindBar: View {
+    @ObservedObject var document: TableDocument
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+            TextField("Search", text: $document.searchQuery)
+                .textFieldStyle(.plain)
+                .focused($focused)
+                .frame(minWidth: 200)
+                .onSubmit { document.nextMatch() }
+                .onChange(of: document.searchQuery) { _, _ in document.performSearch() }
+            Text(matchText)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+                .frame(minWidth: 90, alignment: .trailing)
+            Toggle(isOn: $document.searchCaseSensitive) { Text("Aa") }
+                .toggleStyle(.button)
+                .help("Match case")
+                .onChange(of: document.searchCaseSensitive) { _, _ in document.performSearch() }
+            Button { document.previousMatch() } label: { Image(systemName: "chevron.up") }
+                .disabled(document.matchRows.isEmpty)
+                .help("Previous match (⇧⌘G)")
+            Button { document.nextMatch() } label: { Image(systemName: "chevron.down") }
+                .disabled(document.matchRows.isEmpty)
+                .help("Next match (⌘G)")
+            Button { close() } label: { Image(systemName: "xmark") }
+                .help("Close (Esc)")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(.bar)
+        .onAppear { focused = true }
+        .onKeyPress(.escape) { close(); return .handled }
+    }
+
+    private func close() {
+        document.findBarVisible = false
+        document.clearSearch()
+    }
+
+    private var matchText: String {
+        if document.searchQuery.isEmpty { return "" }
+        if document.matchRows.isEmpty { return document.isSearching ? "searching…" : "no results" }
+        let pos = document.currentMatchIndex + 1
+        let total = document.matchRows.count
+        return document.isSearching ? "\(pos) of \(total)+" : "\(pos) of \(total)"
     }
 }
 

@@ -206,6 +206,7 @@ struct CSVTableView: NSViewRepresentable {
                 self?.scheduleReload(force: self?.document.progress.isComplete ?? false)
             }
             document.onScrollToRow = { [weak self] row in self?.revealLogical(row) }
+            document.onSearchChanged = { [weak self] in self?.tableView?.reloadData() }
 
             rebuildColumnsIfNeeded()
             performReload()
@@ -488,12 +489,39 @@ struct CSVTableView: NSViewRepresentable {
                 cell.textColor = .secondaryLabelColor
                 cell.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
             } else if let columnIndex = Int(id.rawValue) {
-                cell.stringValue = document.cell(displayRow: logical(row), column: columnIndex)
+                let text = document.cell(displayRow: logical(row), column: columnIndex)
                 cell.alignment = .left
                 cell.textColor = .labelColor
                 cell.font = .systemFont(ofSize: 12)
+                cell.stringValue = text
+                if let highlighted = highlightedString(text) {
+                    cell.attributedStringValue = highlighted
+                }
             }
             return cell
+        }
+
+        /// Yellow-highlight every occurrence of the active search query in `text`,
+        /// or nil when there's no active query / no match (cell stays plain).
+        private func highlightedString(_ text: String) -> NSAttributedString? {
+            let query = document.searchQuery
+            guard !query.isEmpty, !text.isEmpty else { return nil }
+            let options: String.CompareOptions = document.searchCaseSensitive ? [] : [.caseInsensitive]
+            guard text.range(of: query, options: options) != nil else { return nil }
+
+            let attr = NSMutableAttributedString(string: text, attributes: [
+                .foregroundColor: NSColor.labelColor,
+                .font: NSFont.systemFont(ofSize: 12),
+            ])
+            var from = text.startIndex
+            while let r = text.range(of: query, options: options, range: from..<text.endIndex) {
+                attr.addAttribute(.backgroundColor,
+                                  value: NSColor.systemYellow.withAlphaComponent(0.45),
+                                  range: NSRange(r, in: text))
+                if r.upperBound == text.endIndex { break }
+                from = r.upperBound
+            }
+            return attr
         }
     }
 }

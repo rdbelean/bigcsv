@@ -77,6 +77,37 @@ public nonisolated final class RecordIndex: @unchecked Sendable {
         byteRanges(forRows: row..<(row + 1), mapper: mapper, dialect: dialect).first
     }
 
+    /// The record (row) index that contains byte `offset` — used by search to map
+    /// a byte-match back to a row. Binary-searches the checkpoints, then scans the
+    /// containing ~`stride`-record block.
+    public func row(forByteOffset offset: Int,
+                    mapper: FileMapper,
+                    dialect: CSVDialect) -> Int {
+        lock.lock()
+        let total = _count
+        if total == 0 || checkpoints.isEmpty { lock.unlock(); return 0 }
+        var lo = 0, hi = checkpoints.count - 1, c = 0
+        while lo <= hi {
+            let mid = (lo + hi) / 2
+            if checkpoints[mid] <= offset { c = mid; lo = mid + 1 } else { hi = mid - 1 }
+        }
+        let start = checkpoints[c]
+        lock.unlock()
+
+        let bytes = mapper.bytes
+        let delim = dialect.delimiter.byte
+        let quote = dialect.quote
+        var recStart = start
+        var r = c * stride
+        while r + 1 < total {
+            let next = RecordScanner.nextRecordStart(bytes, from: recStart, delimiter: delim, quote: quote)
+            if next > offset { break }     // offset is inside record r: [recStart, next)
+            recStart = next
+            r += 1
+        }
+        return r
+    }
+
     /// Byte ranges for a contiguous range of rows, resolved in a SINGLE scan from
     /// the nearest checkpoint. The table always asks for a contiguous visible
     /// window, so this is O(stride + window), not O(window · stride).
