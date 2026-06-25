@@ -32,6 +32,16 @@ struct bigcsvApp: App {
             CommandGroup(replacing: .newItem) {
                 Button("Open…") { appModel.presentOpenPanel() }
                     .keyboardShortcut("o", modifiers: .command)
+                Menu("Open Recent") {
+                    ForEach(appModel.recentFiles) { file in
+                        Button(file.name) { appModel.openRecent(file) }
+                    }
+                    if !appModel.recentFiles.isEmpty {
+                        Divider()
+                        Button("Clear Menu") { appModel.clearRecents() }
+                    }
+                }
+                .disabled(appModel.recentFiles.isEmpty)
             }
             CommandGroup(after: .toolbar) {
                 Button("Go to Row…") { appModel.showGoToRow = true }

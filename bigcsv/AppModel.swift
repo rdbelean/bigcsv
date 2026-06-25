@@ -15,6 +15,8 @@ final class AppModel: ObservableObject {
     @Published var errorMessage: String?
     /// Drives the "Go to Row…" sheet (triggered by ⌘L).
     @Published var showGoToRow = false
+    /// Recently opened files (Open Recent menu), persisted via security bookmarks.
+    @Published private(set) var recentFiles: [RecentFile] = Bookmarks.load()
 
     /// Re-open the current document's file (e.g. after it changed on disk).
     func reopenCurrent() {
@@ -36,10 +38,39 @@ final class AppModel: ObservableObject {
         do {
             document = try TableDocument(url: url, securityScoped: scoped)
             errorMessage = nil
+            rememberRecent(url)        // bookmark while we have access
         } catch {
             if scoped { url.stopAccessingSecurityScopedResource() }
             errorMessage = "Could not open \(url.lastPathComponent): \(error.localizedDescription)"
         }
+    }
+
+    // MARK: Recent files
+
+    private func rememberRecent(_ url: URL) {
+        guard let bookmark = Bookmarks.makeBookmark(for: url) else { return }
+        let entry = RecentFile(name: url.lastPathComponent, path: url.path, bookmark: bookmark)
+        recentFiles.removeAll { $0.path == entry.path }
+        recentFiles.insert(entry, at: 0)
+        if recentFiles.count > Bookmarks.maxRecent {
+            recentFiles = Array(recentFiles.prefix(Bookmarks.maxRecent))
+        }
+        Bookmarks.save(recentFiles)
+    }
+
+    func openRecent(_ file: RecentFile) {
+        guard let url = Bookmarks.resolve(file.bookmark) else {
+            recentFiles.removeAll { $0.id == file.id }
+            Bookmarks.save(recentFiles)
+            errorMessage = "“\(file.name)” could not be found. It may have moved or been deleted."
+            return
+        }
+        open(url: url)
+    }
+
+    func clearRecents() {
+        recentFiles = []
+        Bookmarks.save(recentFiles)
     }
 
     /// Present an open panel restricted to the delimited-text types we handle.

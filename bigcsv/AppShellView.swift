@@ -11,7 +11,9 @@ struct AppShellView: View {
             if let document = appModel.document {
                 DocumentView(document: document)
             } else {
-                EmptyStateView { appModel.presentOpenPanel() }
+                EmptyStateView(onOpen: { appModel.presentOpenPanel() },
+                               recentFiles: appModel.recentFiles,
+                               onOpenRecent: { appModel.openRecent($0) })
             }
         }
         .frame(minWidth: 760, minHeight: 460)
@@ -172,6 +174,8 @@ struct FormatMenu: ToolbarContent {
 /// Shown before any file is open: a friendly drop target for non-technical users.
 struct EmptyStateView: View {
     let onOpen: () -> Void
+    var recentFiles: [RecentFile] = []
+    var onOpenRecent: (RecentFile) -> Void = { _ in }
 
     var body: some View {
         VStack(spacing: 18) {
@@ -189,6 +193,22 @@ struct EmptyStateView: View {
             }
             .controlSize(.large)
             .keyboardShortcut("o", modifiers: .command)
+
+            if !recentFiles.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("RECENT")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                    ForEach(recentFiles.prefix(5)) { file in
+                        Button { onOpenRecent(file) } label: {
+                            Label(file.name, systemImage: "doc.text")
+                                .font(.callout)
+                        }
+                        .buttonStyle(.link)
+                    }
+                }
+                .padding(.top, 8)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .controlBackgroundColor))
