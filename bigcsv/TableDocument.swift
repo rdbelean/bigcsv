@@ -313,9 +313,10 @@ final class TableDocument: ObservableObject {
         if !didJumpToFirstMatch, let first = matchRows.first {
             didJumpToFirstMatch = true
             currentMatchIndex = 0
-            requestScrollToRow(first)
+            requestScrollToRow(first)   // also repaints (highlights) the visible window
         }
-        onSearchChanged?()
+        // No table reload here: highlighting is query-based and already applied as
+        // cells render; streaming matches only update the count + navigation.
     }
 
     func nextMatch() {

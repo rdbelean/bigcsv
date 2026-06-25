@@ -29,8 +29,11 @@ struct CSVTableView: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {
+        // Data changes flow through the document's callbacks (onIndexUpdate /
+        // onSearchChanged / onSortChanged). Avoid a forced reload here — it would
+        // fire on every @Published change (e.g. streaming match counts) and stutter
+        // scrolling. Only make sure the columns exist.
         context.coordinator.rebuildColumnsIfNeeded()
-        context.coordinator.scheduleReload(force: true)
     }
 
     // MARK: - Scroll view that forwards wheel/keys to the coordinator

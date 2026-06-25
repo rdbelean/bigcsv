@@ -80,10 +80,8 @@ public nonisolated struct SearchEngine: Sendable {
             }
             pos = hit + needle.count
             scanned += 1
-            if scanned & 0x3FF == 0 {
-                onProgress(matches, Double(hit) / Double(n), false)
-                await Task.yield()
-            }
+            if scanned & 0x3FF == 0 { await Task.yield() }            // stay cancellable
+            if scanned & 0x3FFF == 0 { onProgress(matches, Double(hit) / Double(n), false) }
         }
         onProgress(matches, 1, true)
     }
