@@ -3,31 +3,43 @@ import AppKit
 import QuartzCore
 
 /// SwiftUI wrapper around an `NSTableView` that scrolls smoothly over files of
-/// any size — including ones large enough to overflow AppKit's backing-store
-/// geometry (document height = rows × rowHeight × backingScale must stay under
-/// 2³¹ device pixels, which breaks around ~48M rows on a 2× Retina display).
+/// ANY size. AppKit crashes ("Invalid view geometry: width is negative") once a
+/// table's document view gets tall enough (row count × rowHeight × backingScale
+/// approaching 2³¹ device pixels — which happens well before the file's true row
+/// count for big files). So we never give the table a tall document.
 ///
-/// Strategy: the table's document is *capped* at `cap` physical rows. As long as
-/// the file fits within `cap` (which covers the vast majority of real files,
-/// including tens of millions of rows), `windowOrigin` stays 0 and this behaves
-/// exactly like a plain, fully-native NSTableView — native scroller, native
-/// momentum, nothing custom. Only files larger than `cap` "window": the capped
-/// page slides over the file, and when the viewport nears a page edge we shift
-/// `windowOrigin` and counter-shift the clip by the exact same number of rows so
-/// nothing visibly moves. Native scrolling does all the work; we only observe.
+/// Instead the table holds only a small **buffer** of physical rows (a window
+/// onto the file at `windowOrigin`), and we OWN the vertical scroll: a custom
+/// `scrollWheel` accumulates the OS scroll/momentum delta stream into a
+/// whole-file offset `virtualY`, from which we compute which rows the buffer maps
+/// to and the exact clip position. Because we drive the clip every event there is
+/// no native momentum to fight (the previous "can't scroll up / stutter" came
+/// from recentering *against* AppKit's own momentum). A custom `NSScroller`
+/// reflects whole-file position; horizontal scrolling stays native.
 struct CSVTableView: NSViewRepresentable {
 
     @ObservedObject var document: TableDocument
 
     func makeCoordinator() -> Coordinator { Coordinator(document: document) }
 
-    func makeNSView(context: Context) -> NSScrollView {
-        context.coordinator.makeScrollView()
+    func makeNSView(context: Context) -> NSView {
+        context.coordinator.makeContainer()
     }
 
-    func updateNSView(_ nsView: NSScrollView, context: Context) {
+    func updateNSView(_ nsView: NSView, context: Context) {
         context.coordinator.rebuildColumnsIfNeeded()
         context.coordinator.scheduleReload(force: true)
+    }
+
+    // MARK: - Scroll view that forwards wheel/keys to the coordinator
+
+    final class SynthScrollView: NSScrollView {
+        weak var coordinator: Coordinator?
+        override func scrollWheel(with event: NSEvent) { coordinator?.handleScrollWheel(event) }
+        override func keyDown(with event: NSEvent) {
+            if coordinator?.handleKeyDown(event) != true { super.keyDown(with: event) }
+        }
+        override var acceptsFirstResponder: Bool { true }
     }
 
     // MARK: - Coordinator
@@ -37,25 +49,28 @@ struct CSVTableView: NSViewRepresentable {
         static let rowNumberColumnID = NSUserInterfaceItemIdentifier("__row__")
 
         private let document: TableDocument
-        /// Max physical rows in the table's document. 20M × 22pt × 3× scale ≈
-        /// 1.32e9 device px — safely under 2³¹ — yet large enough that files up
-        /// to 20M rows never window (pure native scrolling).
-        private let cap = 20_000_000
         private let rowHeight: CGFloat = 22
+        /// Physical rows the table actually holds. 50,000 × 22pt × 2 ≈ 2.2M device
+        /// px — orders of magnitude under the geometry limit that crashes tall
+        /// tables — yet large enough that the window only re-bases every ~30k rows
+        /// of travel (a cheap, seamless reloadData of the same visible rows).
+        private let bufferRows = 50_000
+        private let overscan = 10_000         // rows of slack above the viewport
+        private let scrollerWidth: CGFloat = 15
 
         private weak var tableView: NSTableView?
-        private weak var scrollView: NSScrollView?
+        private weak var scrollView: SynthScrollView?
         private weak var gutterColumn: NSTableColumn?
+        private var vScroller: NSScroller?
 
-        /// Logical (whole-file) row mapped to physical row 0 of the capped page.
+        /// Whole-file vertical scroll offset, in points.
+        private var virtualY: CGFloat = 0
+        /// Logical row mapped to physical row 0 of the buffer.
         private var windowOrigin = 0
-        /// Selection tracked in whole-file (logical) coordinates.
         private var selectedLogical = IndexSet()
-        private var lastClipY: CGFloat = -1
 
-        private var isRecentering = false
+        private var isDrivingScroller = false
         private var isReprojecting = false
-
         private var builtColumnsVersion = -1
         private var lastReloadTime: CFTimeInterval = 0
         private var reloadScheduled = false
@@ -69,7 +84,7 @@ struct CSVTableView: NSViewRepresentable {
 
         // MARK: View construction
 
-        func makeScrollView() -> NSScrollView {
+        func makeContainer() -> NSView {
             let table = NSTableView()
             table.dataSource = self
             table.delegate = self
@@ -86,37 +101,198 @@ struct CSVTableView: NSViewRepresentable {
             table.doubleAction = #selector(handleDoubleClick)
             self.tableView = table
 
-            let scroll = NSScrollView()
+            let scroll = SynthScrollView()
+            scroll.coordinator = self
             scroll.documentView = table
-            scroll.hasVerticalScroller = true
+            scroll.hasVerticalScroller = false           // we own a whole-file scroller
             scroll.hasHorizontalScroller = true
-            scroll.autohidesScrollers = true
+            scroll.autohidesScrollers = false
             scroll.borderType = .noBorder
-            scroll.contentView.postsBoundsChangedNotifications = true
+            scroll.contentView.postsFrameChangedNotifications = true
             self.scrollView = scroll
 
+            let container = NSView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
+            scroll.frame = NSRect(x: 0, y: 0, width: 600 - scrollerWidth, height: 400)
+            scroll.autoresizingMask = [.width, .height]
+            container.addSubview(scroll)
+
+            let scroller = NSScroller(frame: NSRect(x: 600 - scrollerWidth, y: 0,
+                                                    width: scrollerWidth, height: 400))
+            scroller.scrollerStyle = .legacy
+            scroller.autoresizingMask = [.minXMargin, .height]
+            scroller.target = self
+            scroller.action = #selector(scrollerAction(_:))
+            scroller.knobProportion = 1
+            scroller.doubleValue = 0
+            container.addSubview(scroller)
+            self.vScroller = scroller
+
             NotificationCenter.default.addObserver(
-                self, selector: #selector(clipBoundsChanged),
-                name: NSView.boundsDidChangeNotification, object: scroll.contentView)
+                self, selector: #selector(viewGeometryChanged),
+                name: NSView.frameDidChangeNotification, object: scroll.contentView)
 
             document.onIndexUpdate = { [weak self] in
                 self?.rebuildColumnsIfNeeded()
                 self?.scheduleReload(force: self?.document.progress.isComplete ?? false)
             }
-            document.onScrollToRow = { [weak self] row in
-                self?.revealLogical(row)
-            }
+            document.onScrollToRow = { [weak self] row in self?.revealLogical(row) }
 
             rebuildColumnsIfNeeded()
             performReload()
-            return scroll
+            return container
         }
 
-        // MARK: Logical <-> physical mapping
+        // MARK: Geometry helpers
 
         private func totalRows() -> Int { document.displayRowCount }
-        private func pageRows(_ total: Int) -> Int { min(total, cap) }
         private func logical(_ physical: Int) -> Int { windowOrigin + physical }
+
+        private func viewportHeight() -> CGFloat { scrollView?.contentView.bounds.height ?? 0 }
+        private func visibleRowCount() -> Int { max(1, Int(ceil(viewportHeight() / rowHeight))) }
+        private func maxVirtualY() -> CGFloat {
+            max(0, CGFloat(totalRows()) * rowHeight - viewportHeight())
+        }
+
+        // MARK: Scroll input
+
+        func handleScrollWheel(_ event: NSEvent) {
+            guard let clip = scrollView?.contentView, let table = tableView else { return }
+
+            let dyUnit = event.hasPreciseScrollingDeltas ? CGFloat(1) : rowHeight * 3
+            let dxUnit = event.hasPreciseScrollingDeltas ? CGFloat(1) : rowHeight * 3
+            virtualY = min(max(0, virtualY - event.scrollingDeltaY * dyUnit), maxVirtualY())
+
+            let docWidth = table.frame.width
+            let clipWidth = clip.bounds.width
+            let newX = min(max(0, clip.bounds.origin.x - event.scrollingDeltaX * dxUnit),
+                           max(0, docWidth - clipWidth))
+            applyVirtual(clipX: newX)
+        }
+
+        func handleKeyDown(_ event: NSEvent) -> Bool {
+            let vh = viewportHeight()
+            switch event.keyCode {
+            case 126: virtualY -= rowHeight                       // up arrow
+            case 125: virtualY += rowHeight                       // down arrow
+            case 116: virtualY -= max(rowHeight, vh - rowHeight)  // page up
+            case 121: virtualY += max(rowHeight, vh - rowHeight)  // page down
+            case 115: virtualY = 0                                // home
+            case 119: virtualY = maxVirtualY()                    // end
+            default: return false
+            }
+            virtualY = min(max(0, virtualY), maxVirtualY())
+            applyVirtual()
+            return true
+        }
+
+        /// Recompute the window + clip from `virtualY` and paint.
+        private func applyVirtual(clipX: CGFloat? = nil) {
+            guard let clip = scrollView?.contentView else { return }
+            let total = totalRows()
+            guard total > 0 else { driveScroller(total: 0); return }
+
+            let topLogical = min(max(0, Int(floor(virtualY / rowHeight))), total - 1)
+            let subRow = virtualY - CGFloat(topLogical) * rowHeight
+            let visRows = visibleRowCount()
+
+            // Re-base the window if the viewport drifted near a buffer edge.
+            let lowEdge = windowOrigin + overscan
+            let highEdge = windowOrigin + bufferRows - overscan - visRows
+            if topLogical < lowEdge || topLogical > highEdge {
+                let newOrigin = min(max(0, topLogical - overscan), max(0, total - bufferRows))
+                if newOrigin != windowOrigin {
+                    windowOrigin = newOrigin
+                    table_reloadKeepingScroll()
+                }
+            }
+
+            let x = clipX ?? clip.bounds.origin.x
+            let y = CGFloat(topLogical - windowOrigin) * rowHeight + subRow
+            CATransaction.begin(); CATransaction.setDisableActions(true)
+            clip.setBoundsOrigin(NSPoint(x: x, y: y))
+            scrollView?.reflectScrolledClipView(clip)
+            CATransaction.commit()
+            driveScroller(total: total)
+        }
+
+        private func table_reloadKeepingScroll() {
+            tableView?.reloadData()
+            reprojectSelection()
+        }
+
+        // MARK: Whole-file scroller
+
+        private func driveScroller(total: Int) {
+            guard !isDrivingScroller, let scroller = vScroller else { return }
+            let vh = viewportHeight()
+            let maxY = maxVirtualY()
+            scroller.knobProportion = CGFloat(min(1.0, total > 0 ? Double(vh) / (Double(total) * Double(rowHeight)) : 1))
+            scroller.doubleValue = maxY > 0 ? Double(virtualY / maxY) : 0
+        }
+
+        @objc private func scrollerAction(_ sender: NSScroller) {
+            isDrivingScroller = true
+            defer { isDrivingScroller = false }
+            let maxY = maxVirtualY()
+            let vh = viewportHeight()
+            switch sender.hitPart {
+            case .knob, .knobSlot:
+                virtualY = CGFloat(sender.doubleValue) * maxY
+            case .incrementPage: virtualY += max(rowHeight, vh - rowHeight)
+            case .decrementPage: virtualY -= max(rowHeight, vh - rowHeight)
+            case .incrementLine: virtualY += rowHeight
+            case .decrementLine: virtualY -= rowHeight
+            default: break
+            }
+            virtualY = min(max(0, virtualY), maxY)
+            applyVirtual()
+        }
+
+        // MARK: Resize / growth
+
+        @objc private func viewGeometryChanged() {
+            virtualY = min(virtualY, maxVirtualY())
+            applyVirtual()
+        }
+
+        // MARK: Go-to-row & inspector
+
+        private func revealLogical(_ target: Int) {
+            let total = totalRows()
+            guard total > 0 else { return }
+            let l = min(max(0, target), total - 1)
+            let vh = viewportHeight()
+            virtualY = min(max(0, CGFloat(l) * rowHeight - (vh - rowHeight) / 2), maxVirtualY())
+            applyVirtual()
+            selectedLogical = IndexSet(integer: l)
+            reprojectSelection()
+            driveScroller(total: total)
+        }
+
+        @objc private func handleDoubleClick() {
+            guard let row = tableView?.clickedRow, row >= 0 else { return }
+            document.requestInspector(displayRow: logical(row))
+        }
+
+        // MARK: Selection (logical)
+
+        func tableViewSelectionDidChange(_ notification: Notification) {
+            guard !isReprojecting, let table = tableView else { return }
+            selectedLogical = IndexSet(table.selectedRowIndexes.map { logical($0) })
+        }
+
+        private func reprojectSelection() {
+            guard let table = tableView else { return }
+            isReprojecting = true
+            let n = table.numberOfRows
+            var physical = IndexSet()
+            for l in selectedLogical {
+                let p = l - windowOrigin
+                if p >= 0 && p < n { physical.insert(p) }
+            }
+            table.selectRowIndexes(physical, byExtendingSelection: false)
+            isReprojecting = false
+        }
 
         // MARK: Columns
 
@@ -157,7 +333,7 @@ struct CSVTableView: NSViewRepresentable {
             if gutter.width < needed { gutter.width = needed }
         }
 
-        // MARK: Reload coalescing (~30 Hz)
+        // MARK: Reload coalescing (~30 Hz, as the index streams in)
 
         func scheduleReload(force: Bool) {
             let now = CACurrentMediaTime()
@@ -177,135 +353,20 @@ struct CSVTableView: NSViewRepresentable {
         private func performReload() {
             lastReloadTime = CACurrentMediaTime()
             let total = totalRows()
-            if windowOrigin > max(0, total - 1) { resetToTop() }   // e.g. after a re-index
+            if windowOrigin > max(0, total - 1) {          // e.g. after a re-index
+                windowOrigin = 0
+                virtualY = 0
+                selectedLogical = []
+            }
             updateGutterWidth()
             tableView?.noteNumberOfRowsChanged()
-        }
-
-        private func resetToTop() {
-            windowOrigin = 0
-            selectedLogical = []
-            guard let clip = scrollView?.contentView else { return }
-            withoutObserving {
-                tableView?.reloadData()
-                clip.setBoundsOrigin(NSPoint(x: clip.bounds.origin.x, y: 0))
-                scrollView?.reflectScrolledClipView(clip)
-            }
-        }
-
-        // MARK: Scroll observation & recentering (only matters for files > cap)
-
-        @objc private func clipBoundsChanged() {
-            guard !isRecentering, let clip = scrollView?.contentView else { return }
-            let vy = clip.bounds.origin.y
-            // Ignore horizontal-only scrolling — it must never trigger a vertical
-            // recenter (that was making left/right scrolling choppy).
-            if vy == lastClipY { return }
-            lastClipY = vy
-
-            let total = totalRows()
-            let page = pageRows(total)
-            // Fast path: the whole file fits in the page — never window.
-            guard total > cap else { return }
-
-            let h = rowHeight
-            let vh = clip.bounds.height
-            let topPhys = Int(floor(vy / h))
-            let botPhys = Int(ceil((vy + vh) / h))
-            let visRows = max(1, botPhys - topPhys)
-            let band = max(visRows * 4, 20_000)
-
-            var delta = 0
-            if topPhys < band && windowOrigin > 0 {
-                delta = -min(windowOrigin, cap / 2)
-            } else if (page - botPhys) < band && windowOrigin < (total - page) {
-                delta = min(total - page - windowOrigin, cap / 2)
-            }
-            if delta != 0 { performRecenter(delta: delta, clip: clip, vy: vy, vh: vh) }
-        }
-
-        private func performRecenter(delta: Int, clip: NSClipView, vy: CGFloat, vh: CGFloat) {
-            withoutObserving {
-                windowOrigin += delta
-                tableView?.reloadData()
-                let newPage = min(cap, totalRows() - windowOrigin)
-                let maxY = max(0, CGFloat(newPage) * rowHeight - vh)
-                let newY = min(max(0, vy - CGFloat(delta) * rowHeight), maxY)
-                clip.setBoundsOrigin(NSPoint(x: clip.bounds.origin.x, y: newY))
-                scrollView?.reflectScrolledClipView(clip)
-                lastClipY = newY
-                reprojectSelection()
-            }
-        }
-
-        /// Programmatic scroll/reload with our observer and Core Animation quiet.
-        private func withoutObserving(_ body: () -> Void) {
-            isRecentering = true
-            NSAnimationContext.beginGrouping()
-            NSAnimationContext.current.duration = 0
-            CATransaction.begin()
-            CATransaction.setDisableActions(true)
-            body()
-            CATransaction.commit()
-            NSAnimationContext.endGrouping()
-            isRecentering = false
-        }
-
-        /// Reveal (and select) a whole-file row — used by Go-to-Row (⌘L). Works
-        /// across the whole file even when the target is beyond the current page.
-        private func revealLogical(_ target: Int) {
-            let total = totalRows()
-            guard total > 0, let clip = scrollView?.contentView else { return }
-            let vh = clip.bounds.height
-            let page = pageRows(total)
-            let l = min(max(0, target), total - 1)
-            let targetWindow = min(max(0, l - cap / 2), max(0, total - page))
-
-            withoutObserving {
-                if targetWindow != windowOrigin {
-                    windowOrigin = targetWindow
-                    tableView?.reloadData()
-                }
-                let pageH = CGFloat(min(cap, total - windowOrigin)) * rowHeight
-                let y = min(max(0, CGFloat(l - windowOrigin) * rowHeight - (vh - rowHeight) / 2),
-                            max(0, pageH - vh))
-                clip.setBoundsOrigin(NSPoint(x: clip.bounds.origin.x, y: y))
-                scrollView?.reflectScrolledClipView(clip)
-                lastClipY = y
-                selectedLogical = IndexSet(integer: l)
-                reprojectSelection()
-            }
-        }
-
-        // MARK: Selection (logical)
-
-        func tableViewSelectionDidChange(_ notification: Notification) {
-            guard !isReprojecting, let table = tableView else { return }
-            selectedLogical = IndexSet(table.selectedRowIndexes.map { logical($0) })
-        }
-
-        private func reprojectSelection() {
-            guard let table = tableView else { return }
-            isReprojecting = true
-            let n = table.numberOfRows
-            var physical = IndexSet()
-            for l in selectedLogical {
-                let p = l - windowOrigin
-                if p >= 0 && p < n { physical.insert(p) }
-            }
-            table.selectRowIndexes(physical, byExtendingSelection: false)
-            isReprojecting = false
-        }
-
-        @objc private func handleDoubleClick() {
-            guard let row = tableView?.clickedRow, row >= 0 else { return }
-            document.requestInspector(displayRow: logical(row))
+            applyVirtual()
         }
 
         // MARK: NSTableViewDataSource / Delegate
 
         func numberOfRows(in tableView: NSTableView) -> Int {
-            max(0, min(document.displayRowCount - windowOrigin, cap))
+            max(0, min(document.displayRowCount - windowOrigin, bufferRows))
         }
 
         func tableView(_ tableView: NSTableView,
