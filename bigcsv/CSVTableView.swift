@@ -59,7 +59,11 @@ struct CSVTableView: NSViewRepresentable {
         private let content = NSView()
         /// Click handler: passes the DATA column index (gutter clicks are ignored).
         var onColumnClick: ((Int) -> Void)?
+        /// Resize handler: (column index incl. gutter, new width).
+        var onResize: ((_ columnIndex: Int, _ newWidth: CGFloat) -> Void)?
         private var columnRanges: [(start: CGFloat, end: CGFloat, dataIndex: Int)] = []
+        private var resizingIndex: Int?
+        private var trackingArea: NSTrackingArea?
         override var isFlipped: Bool { true }
 
         override init(frame frameRect: NSRect) {
@@ -69,14 +73,46 @@ struct CSVTableView: NSViewRepresentable {
         }
         required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            if let t = trackingArea { removeTrackingArea(t) }
+            let t = NSTrackingArea(rect: bounds, options: [.activeInActiveApp, .mouseMoved, .inVisibleRect],
+                                   owner: self, userInfo: nil)
+            addTrackingArea(t)
+            trackingArea = t
+        }
+
+        private func contentX(_ event: NSEvent) -> CGFloat {
+            convert(event.locationInWindow, from: nil).x - content.frame.origin.x
+        }
+
+        /// Index into `columnRanges` whose right edge is near `x` (a resize grip).
+        private func boundary(near x: CGFloat) -> Int? {
+            for (i, c) in columnRanges.enumerated() where abs(x - c.end) < 5 { return i }
+            return nil
+        }
+
+        override func mouseMoved(with event: NSEvent) {
+            if boundary(near: contentX(event)) != nil { NSCursor.resizeLeftRight.set() }
+            else { NSCursor.arrow.set() }
+        }
+
         override func mouseDown(with event: NSEvent) {
-            let p = convert(event.locationInWindow, from: nil)
-            let xInContent = p.x - content.frame.origin.x
-            for c in columnRanges where xInContent >= c.start && xInContent < c.end {
-                if c.dataIndex >= 0 { onColumnClick?(c.dataIndex) }
+            let x = contentX(event)
+            if let b = boundary(near: x) { resizingIndex = b; return }   // start a resize drag
+            for c in columnRanges where x >= c.start && x < c.end {
+                if c.dataIndex >= 0 { onColumnClick?(c.dataIndex) }       // a sort click
                 return
             }
         }
+
+        override func mouseDragged(with event: NSEvent) {
+            guard let idx = resizingIndex, idx < columnRanges.count else { return }
+            let newWidth = max(40, contentX(event) - columnRanges[idx].start)
+            onResize?(idx, newWidth)                                      // idx == column index (gutter is 0)
+        }
+
+        override func mouseUp(with event: NSEvent) { resizingIndex = nil }
 
         override func draw(_ dirtyRect: NSRect) {
             NSColor.windowBackgroundColor.setFill()
@@ -239,6 +275,14 @@ struct CSVTableView: NSViewRepresentable {
                 self?.tableView?.reloadData()
             }
             header.onColumnClick = { [weak self] col in self?.document.toggleSort(column: col) }
+            header.onResize = { [weak self] columnIndex, newWidth in
+                guard let self, let table = self.tableView,
+                      columnIndex >= 0, columnIndex < table.tableColumns.count else { return }
+                let col = table.tableColumns[columnIndex]
+                col.width = max(col.minWidth, newWidth)
+                self.rebuildHeader()
+                self.applyVirtual()       // re-sync header offset + horizontal range
+            }
 
             rebuildColumnsIfNeeded()
             performReload()
