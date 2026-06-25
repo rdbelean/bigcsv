@@ -4,18 +4,20 @@ import QuartzCore
 
 /// SwiftUI wrapper around an `NSTableView` that scrolls smoothly over files of
 /// ANY size. AppKit crashes ("Invalid view geometry: width is negative") once a
-/// table's document view gets tall enough (row count × rowHeight × backingScale
-/// approaching 2³¹ device pixels — which happens well before the file's true row
-/// count for big files). So we never give the table a tall document.
+/// table's document view gets tall enough (rows × rowHeight × backingScale near
+/// 2³¹ device pixels — well before a big file's true row count). So we never give
+/// the table a tall document.
 ///
-/// Instead the table holds only a small **buffer** of physical rows (a window
-/// onto the file at `windowOrigin`), and we OWN the vertical scroll: a custom
-/// `scrollWheel` accumulates the OS scroll/momentum delta stream into a
-/// whole-file offset `virtualY`, from which we compute which rows the buffer maps
-/// to and the exact clip position. Because we drive the clip every event there is
-/// no native momentum to fight (the previous "can't scroll up / stutter" came
-/// from recentering *against* AppKit's own momentum). A custom `NSScroller`
-/// reflects whole-file position; horizontal scrolling stays native.
+/// The table holds only a small **buffer** of physical rows (a window onto the
+/// file at `windowOrigin`), and we OWN the vertical scroll: a custom `scrollWheel`
+/// accumulates the OS scroll/momentum delta stream into a whole-file `virtualY`,
+/// from which we compute which rows the buffer maps to and the exact clip
+/// position. There is no native momentum to fight. A custom `NSScroller` reflects
+/// whole-file position; horizontal scrolling stays native.
+///
+/// We draw our OWN fixed column header (the built-in `NSTableHeaderView`
+/// mis-positions itself when we drive the clip manually), kept horizontally in
+/// sync with the table.
 struct CSVTableView: NSViewRepresentable {
 
     @ObservedObject var document: TableDocument
@@ -42,6 +44,48 @@ struct CSVTableView: NSViewRepresentable {
         override var acceptsFirstResponder: Bool { true }
     }
 
+    // MARK: - Fixed, horizontally-syncable column header
+
+    final class ColumnHeaderView: NSView {
+        private let content = NSView()
+        override var isFlipped: Bool { true }
+
+        override init(frame frameRect: NSRect) {
+            super.init(frame: frameRect)
+            clipsToBounds = true
+            addSubview(content)
+        }
+        required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+        override func draw(_ dirtyRect: NSRect) {
+            NSColor.windowBackgroundColor.setFill()
+            dirtyRect.fill()
+            NSColor.separatorColor.setStroke()
+            let y = bounds.height - 0.5
+            NSBezierPath.strokeLine(from: NSPoint(x: 0, y: y), to: NSPoint(x: bounds.width, y: y))
+        }
+
+        func rebuild(columns: [(title: String, width: CGFloat)], height: CGFloat) {
+            content.subviews.forEach { $0.removeFromSuperview() }
+            var x: CGFloat = 0
+            for col in columns {
+                let label = NSTextField(labelWithString: col.title)
+                label.font = .systemFont(ofSize: 12, weight: .semibold)
+                label.textColor = .secondaryLabelColor
+                label.lineBreakMode = .byTruncatingTail
+                label.frame = NSRect(x: x + 6, y: (height - 16) / 2,
+                                     width: max(10, col.width - 12), height: 16)
+                content.addSubview(label)
+                x += col.width
+            }
+            content.frame = NSRect(x: content.frame.origin.x, y: 0, width: x, height: height)
+        }
+
+        func setHorizontalOffset(_ x: CGFloat) {
+            content.frame.origin.x = -x
+        }
+    }
+
     // MARK: - Coordinator
 
     final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate {
@@ -50,16 +94,17 @@ struct CSVTableView: NSViewRepresentable {
 
         private let document: TableDocument
         private let rowHeight: CGFloat = 22
-        /// Physical rows the table actually holds. 200,000 × 22pt × 2 ≈ 8.8M
-        /// device px — far under the geometry limit that crashes tall tables —
-        /// yet large enough that the window re-bases only every ~140k rows of
-        /// travel (a cheap, seamless reloadData of the same visible rows).
-        private let bufferRows = 200_000
-        private let overscan = 30_000         // rows of slack around the viewport
+        private let headerHeight: CGFloat = 24
         private let scrollerWidth: CGFloat = 15
+        /// Physical rows the table holds. 200,000 × 22pt × 2 ≈ 8.8M device px —
+        /// far under the geometry limit — yet large enough that the window
+        /// re-bases only every ~140k rows of travel (a seamless reloadData).
+        private let bufferRows = 200_000
+        private let overscan = 30_000
 
         private weak var tableView: NSTableView?
         private weak var scrollView: SynthScrollView?
+        private weak var headerView: ColumnHeaderView?
         private weak var gutterColumn: NSTableColumn?
         private var vScroller: NSScroller?
 
@@ -97,6 +142,7 @@ struct CSVTableView: NSViewRepresentable {
             table.columnAutoresizingStyle = .noColumnAutoresizing
             table.gridStyleMask = [.solidVerticalGridLineMask]
             table.style = .plain
+            table.headerView = nil                      // we draw our own fixed header
             table.target = self
             table.doubleAction = #selector(handleDoubleClick)
             self.tableView = table
@@ -108,24 +154,46 @@ struct CSVTableView: NSViewRepresentable {
             scroll.hasHorizontalScroller = true
             scroll.autohidesScrollers = false
             scroll.borderType = .noBorder
+            scroll.automaticallyAdjustsContentInsets = false
+            scroll.contentInsets = NSEdgeInsetsZero
             scroll.contentView.postsFrameChangedNotifications = true
+            scroll.translatesAutoresizingMaskIntoConstraints = false
             self.scrollView = scroll
 
-            let container = NSView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
-            scroll.frame = NSRect(x: 0, y: 0, width: 600 - scrollerWidth, height: 400)
-            scroll.autoresizingMask = [.width, .height]
-            container.addSubview(scroll)
+            let header = ColumnHeaderView()
+            header.translatesAutoresizingMaskIntoConstraints = false
+            self.headerView = header
 
-            let scroller = NSScroller(frame: NSRect(x: 600 - scrollerWidth, y: 0,
-                                                    width: scrollerWidth, height: 400))
+            let scroller = NSScroller()
             scroller.scrollerStyle = .legacy
-            scroller.autoresizingMask = [.minXMargin, .height]
+            scroller.translatesAutoresizingMaskIntoConstraints = false
             scroller.target = self
             scroller.action = #selector(scrollerAction(_:))
             scroller.knobProportion = 1
             scroller.doubleValue = 0
-            container.addSubview(scroller)
             self.vScroller = scroller
+
+            let container = NSView()
+            container.addSubview(header)
+            container.addSubview(scroll)
+            container.addSubview(scroller)
+
+            NSLayoutConstraint.activate([
+                header.topAnchor.constraint(equalTo: container.topAnchor),
+                header.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+                header.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+                header.heightAnchor.constraint(equalToConstant: headerHeight),
+
+                scroll.topAnchor.constraint(equalTo: header.bottomAnchor),
+                scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+                scroll.trailingAnchor.constraint(equalTo: scroller.leadingAnchor),
+                scroll.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+
+                scroller.topAnchor.constraint(equalTo: header.bottomAnchor),
+                scroller.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+                scroller.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+                scroller.widthAnchor.constraint(equalToConstant: scrollerWidth),
+            ])
 
             NotificationCenter.default.addObserver(
                 self, selector: #selector(viewGeometryChanged),
@@ -146,7 +214,6 @@ struct CSVTableView: NSViewRepresentable {
 
         private func totalRows() -> Int { document.displayRowCount }
         private func logical(_ physical: Int) -> Int { windowOrigin + physical }
-
         private func viewportHeight() -> CGFloat { scrollView?.contentView.bounds.height ?? 0 }
         private func visibleRowCount() -> Int { max(1, Int(ceil(viewportHeight() / rowHeight))) }
         private func maxVirtualY() -> CGFloat {
@@ -158,15 +225,13 @@ struct CSVTableView: NSViewRepresentable {
         func handleScrollWheel(_ event: NSEvent) {
             guard let clip = scrollView?.contentView, let table = tableView else { return }
 
-            let dyUnit = event.hasPreciseScrollingDeltas ? CGFloat(1) : rowHeight * 3
-            let dxUnit = event.hasPreciseScrollingDeltas ? CGFloat(1) : rowHeight * 3
+            let unit = event.hasPreciseScrollingDeltas ? CGFloat(1) : rowHeight * 3
             let maxY = maxVirtualY()
             let before = virtualY
-            virtualY = min(max(0, virtualY - event.scrollingDeltaY * dyUnit), maxY)
-            // Synthesized momentum can "coast to a stop" just shy of an edge
-            // (the OS doesn't know our content bounds). Snap onto the exact first
-            // / last row when scrolling toward and close to that edge, so row 1
-            // and the final row are always reachable by scrolling.
+            virtualY = min(max(0, virtualY - event.scrollingDeltaY * unit), maxY)
+            // Synthesized momentum can coast to a stop just shy of an edge (the OS
+            // doesn't know our content bounds). Snap onto the first / last row when
+            // scrolling toward and close to that edge.
             let snap = rowHeight * 1.5
             if virtualY < before && virtualY <= snap {
                 virtualY = 0
@@ -176,7 +241,7 @@ struct CSVTableView: NSViewRepresentable {
 
             let docWidth = table.frame.width
             let clipWidth = clip.bounds.width
-            let newX = min(max(0, clip.bounds.origin.x - event.scrollingDeltaX * dxUnit),
+            let newX = min(max(0, clip.bounds.origin.x - event.scrollingDeltaX * unit),
                            max(0, docWidth - clipWidth))
             applyVirtual(clipX: newX)
         }
@@ -208,10 +273,9 @@ struct CSVTableView: NSViewRepresentable {
             let visRows = visibleRowCount()
             let maxOrigin = max(0, total - bufferRows)
 
-            // Choose the window origin. Pin it to 0 near the file top and to the
-            // last page near the bottom — those zones then scroll with NO re-base
-            // (smooth, and the very first/last row is always reachable). Only the
-            // middle re-bases, and only when the viewport nears a buffer edge.
+            // Pin the window to 0 near the top and to the last page near the
+            // bottom (those zones scroll with NO re-base); re-base only in the
+            // middle when the viewport nears a buffer edge.
             let newOrigin: Int
             if topLogical < 2 * overscan {
                 newOrigin = 0
@@ -225,7 +289,8 @@ struct CSVTableView: NSViewRepresentable {
             }
             if newOrigin != windowOrigin {
                 windowOrigin = newOrigin
-                table_reloadKeepingScroll()
+                tableView?.reloadData()
+                reprojectSelection()
             }
 
             let x = clipX ?? clip.bounds.origin.x
@@ -234,12 +299,8 @@ struct CSVTableView: NSViewRepresentable {
             clip.setBoundsOrigin(NSPoint(x: x, y: y))
             scrollView?.reflectScrolledClipView(clip)
             CATransaction.commit()
+            headerView?.setHorizontalOffset(x)
             driveScroller(total: total)
-        }
-
-        private func table_reloadKeepingScroll() {
-            tableView?.reloadData()
-            reprojectSelection()
         }
 
         // MARK: Whole-file scroller
@@ -258,8 +319,7 @@ struct CSVTableView: NSViewRepresentable {
             let maxY = maxVirtualY()
             let vh = viewportHeight()
             switch sender.hitPart {
-            case .knob, .knobSlot:
-                virtualY = CGFloat(sender.doubleValue) * maxY
+            case .knob, .knobSlot: virtualY = CGFloat(sender.doubleValue) * maxY
             case .incrementPage: virtualY += max(rowHeight, vh - rowHeight)
             case .decrementPage: virtualY -= max(rowHeight, vh - rowHeight)
             case .incrementLine: virtualY += rowHeight
@@ -269,8 +329,6 @@ struct CSVTableView: NSViewRepresentable {
             virtualY = min(max(0, virtualY), maxY)
             applyVirtual()
         }
-
-        // MARK: Resize / growth
 
         @objc private func viewGeometryChanged() {
             virtualY = min(virtualY, maxVirtualY())
@@ -288,7 +346,6 @@ struct CSVTableView: NSViewRepresentable {
             applyVirtual()
             selectedLogical = IndexSet(integer: l)
             reprojectSelection()
-            driveScroller(total: total)
         }
 
         @objc private func handleDoubleClick() {
@@ -316,7 +373,7 @@ struct CSVTableView: NSViewRepresentable {
             isReprojecting = false
         }
 
-        // MARK: Columns
+        // MARK: Columns + header
 
         func rebuildColumnsIfNeeded() {
             guard let table = tableView else { return }
@@ -342,6 +399,15 @@ struct CSVTableView: NSViewRepresentable {
                 table.addTableColumn(col)
             }
             table.reloadData()
+            rebuildHeader()
+        }
+
+        private func rebuildHeader() {
+            guard let table = tableView else { return }
+            let cols = table.tableColumns.map { (title: $0.identifier == Self.rowNumberColumnID ? "#" : $0.title,
+                                                 width: $0.width) }
+            headerView?.rebuild(columns: cols, height: headerHeight)
+            headerView?.setHorizontalOffset(scrollView?.contentView.bounds.origin.x ?? 0)
         }
 
         private func rowNumberWidth() -> CGFloat {
@@ -352,7 +418,10 @@ struct CSVTableView: NSViewRepresentable {
         private func updateGutterWidth() {
             guard let gutter = gutterColumn else { return }
             let needed = rowNumberWidth()
-            if gutter.width < needed { gutter.width = needed }
+            if gutter.width < needed {
+                gutter.width = needed
+                rebuildHeader()           // keep header columns aligned with the table
+            }
         }
 
         // MARK: Reload coalescing (~30 Hz, as the index streams in)
