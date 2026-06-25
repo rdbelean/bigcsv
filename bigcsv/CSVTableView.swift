@@ -160,7 +160,19 @@ struct CSVTableView: NSViewRepresentable {
 
             let dyUnit = event.hasPreciseScrollingDeltas ? CGFloat(1) : rowHeight * 3
             let dxUnit = event.hasPreciseScrollingDeltas ? CGFloat(1) : rowHeight * 3
-            virtualY = min(max(0, virtualY - event.scrollingDeltaY * dyUnit), maxVirtualY())
+            let maxY = maxVirtualY()
+            let before = virtualY
+            virtualY = min(max(0, virtualY - event.scrollingDeltaY * dyUnit), maxY)
+            // Synthesized momentum can "coast to a stop" just shy of an edge
+            // (the OS doesn't know our content bounds). Snap onto the exact first
+            // / last row when scrolling toward and close to that edge, so row 1
+            // and the final row are always reachable by scrolling.
+            let snap = rowHeight * 1.5
+            if virtualY < before && virtualY <= snap {
+                virtualY = 0
+            } else if virtualY > before && virtualY >= maxY - snap {
+                virtualY = maxY
+            }
 
             let docWidth = table.frame.width
             let clipWidth = clip.bounds.width
