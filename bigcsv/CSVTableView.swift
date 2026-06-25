@@ -50,12 +50,12 @@ struct CSVTableView: NSViewRepresentable {
 
         private let document: TableDocument
         private let rowHeight: CGFloat = 22
-        /// Physical rows the table actually holds. 50,000 × 22pt × 2 ≈ 2.2M device
-        /// px — orders of magnitude under the geometry limit that crashes tall
-        /// tables — yet large enough that the window only re-bases every ~30k rows
-        /// of travel (a cheap, seamless reloadData of the same visible rows).
-        private let bufferRows = 50_000
-        private let overscan = 10_000         // rows of slack above the viewport
+        /// Physical rows the table actually holds. 200,000 × 22pt × 2 ≈ 8.8M
+        /// device px — far under the geometry limit that crashes tall tables —
+        /// yet large enough that the window re-bases only every ~140k rows of
+        /// travel (a cheap, seamless reloadData of the same visible rows).
+        private let bufferRows = 200_000
+        private let overscan = 30_000         // rows of slack around the viewport
         private let scrollerWidth: CGFloat = 15
 
         private weak var tableView: NSTableView?
@@ -194,16 +194,26 @@ struct CSVTableView: NSViewRepresentable {
             let topLogical = min(max(0, Int(floor(virtualY / rowHeight))), total - 1)
             let subRow = virtualY - CGFloat(topLogical) * rowHeight
             let visRows = visibleRowCount()
+            let maxOrigin = max(0, total - bufferRows)
 
-            // Re-base the window if the viewport drifted near a buffer edge.
-            let lowEdge = windowOrigin + overscan
-            let highEdge = windowOrigin + bufferRows - overscan - visRows
-            if topLogical < lowEdge || topLogical > highEdge {
-                let newOrigin = min(max(0, topLogical - overscan), max(0, total - bufferRows))
-                if newOrigin != windowOrigin {
-                    windowOrigin = newOrigin
-                    table_reloadKeepingScroll()
-                }
+            // Choose the window origin. Pin it to 0 near the file top and to the
+            // last page near the bottom — those zones then scroll with NO re-base
+            // (smooth, and the very first/last row is always reachable). Only the
+            // middle re-bases, and only when the viewport nears a buffer edge.
+            let newOrigin: Int
+            if topLogical < 2 * overscan {
+                newOrigin = 0
+            } else if topLogical > total - 2 * overscan {
+                newOrigin = maxOrigin
+            } else if topLogical < windowOrigin + overscan
+                        || topLogical > windowOrigin + bufferRows - overscan - visRows {
+                newOrigin = min(max(0, topLogical - overscan), maxOrigin)
+            } else {
+                newOrigin = windowOrigin
+            }
+            if newOrigin != windowOrigin {
+                windowOrigin = newOrigin
+                table_reloadKeepingScroll()
             }
 
             let x = clipX ?? clip.bounds.origin.x
