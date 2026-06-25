@@ -10,11 +10,17 @@ struct AppShellView: View {
         Group {
             if let document = appModel.document {
                 VStack(spacing: 0) {
-                    CSVTableView(document: document)
-                        .id(ObjectIdentifier(document))   // fresh table per file
+                    if let unsupported = document.unsupportedEncoding {
+                        UnsupportedEncodingView(encoding: unsupported,
+                                                fileName: document.fileURL.lastPathComponent)
+                    } else {
+                        CSVTableView(document: document)
+                            .id(ObjectIdentifier(document))   // fresh table per file
+                    }
                     Divider()
                     StatusBarView(document: document)
                 }
+                .toolbar { FormatMenu(document: document) }
             } else {
                 EmptyStateView { appModel.presentOpenPanel() }
             }
@@ -45,6 +51,43 @@ struct AppShellView: View {
     }
 }
 
+/// Toolbar menu to override the auto-detected delimiter / encoding and toggle the
+/// header row.
+struct FormatMenu: ToolbarContent {
+    @ObservedObject var document: TableDocument
+
+    var body: some ToolbarContent {
+        ToolbarItem(placement: .automatic) {
+            Menu {
+                Picker("Delimiter", selection: Binding(
+                    get: { document.dialect.delimiter },
+                    set: { document.setDelimiter($0) })) {
+                    ForEach(Delimiter.allCases, id: \.self) { d in
+                        Text("\(d.displayName)  (\(d.displaySymbol))").tag(d)
+                    }
+                }
+
+                Picker("Encoding", selection: Binding(
+                    get: { document.dialect.encoding },
+                    set: { document.setEncoding($0) })) {
+                    ForEach(TextEncoding.allCases, id: \.self) { e in
+                        Text(e.displayName).tag(e)
+                    }
+                }
+
+                Divider()
+
+                Toggle("First Row Is Header", isOn: Binding(
+                    get: { document.dialect.hasHeader },
+                    set: { document.setHasHeader($0) }))
+            } label: {
+                Label("Format", systemImage: "tablecells.badge.ellipsis")
+            }
+            .help("Delimiter, encoding, and header options")
+        }
+    }
+}
+
 /// Shown before any file is open: a friendly drop target for non-technical users.
 struct EmptyStateView: View {
     let onOpen: () -> Void
@@ -71,8 +114,31 @@ struct EmptyStateView: View {
     }
 }
 
-/// Minimal Phase-1 status bar: row/column counts and live indexing progress.
-/// (Encoding, delimiter, and file size join in Phase 2.)
+/// Shown when the file is in an encoding we can't safely byte-index.
+struct UnsupportedEncodingView: View {
+    let encoding: UnsupportedEncoding
+    let fileName: String
+
+    var body: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 52, weight: .thin))
+                .foregroundStyle(.orange)
+            Text("This file is \(encoding.rawValue)")
+                .font(.title3.weight(.semibold))
+            Text("“\(fileName)” uses a two-byte encoding that BigCSV can’t open yet. "
+                 + "Re-save it as UTF-8 (most spreadsheet apps offer this on export) and try again.")
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: 460)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(nsColor: .controlBackgroundColor))
+    }
+}
+
+/// Status bar: row/column counts, file size, detected delimiter + encoding, and
+/// live indexing progress.
 struct StatusBarView: View {
     @ObservedObject var document: TableDocument
 
@@ -82,12 +148,21 @@ struct StatusBarView: View {
             if document.columnCount > 0 {
                 Text("\(document.columnCount) columns")
             }
-            Text(fileSizeText)
-                .foregroundStyle(.secondary)
+            Text(fileSizeText).foregroundStyle(.secondary)
 
             Spacer()
 
-            if !document.progress.isComplete {
+            Text(document.dialect.delimiter.displayName)
+                .foregroundStyle(.secondary)
+                .help("Delimiter")
+            Text(document.dialect.encoding.displayName)
+                .foregroundStyle(.secondary)
+                .help("Text encoding")
+
+            if document.unsupportedEncoding != nil {
+                Label("Unsupported encoding", systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.orange)
+            } else if !document.progress.isComplete {
                 HStack(spacing: 8) {
                     ProgressView(value: document.progress.fractionComplete)
                         .frame(width: 120)

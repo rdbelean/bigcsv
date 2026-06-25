@@ -75,9 +75,9 @@ export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 - Signing: Apple Development identity present, team `ML728UQT9W`. (App Store distribution signing is Phase 6.)
 
 ## Phase status
-- [ ] Phase 0 — scaffolding & config
-- [ ] Phase 1 — open → mmap → index → first rows (day-one milestone)
-- [ ] Phase 2 — full virtualized scroll + detection + header + status bar
+- [x] Phase 0 — scaffolding & config
+- [x] Phase 1 — open → mmap → index → first rows (CHECKPOINT 1 PASSED: 1.2 GB / 15M rows, instant open, smooth first-page scroll, correct quoted/embedded-newline/ragged parsing)
+- [ ] Phase 2 — full virtualized (tiling) scroll + delimiter/encoding detection + header toggle + status bar + go-to-row + cell inspector + file-change detection
 - [ ] Phase 3 — search + sort + column ops + recent files + dark mode (SHIPPABLE FREE)
 - Phase 4 (StoreKit unlock), Phase 5 (paid features), Phase 6 (signing/notarization/distribution) — later.
 

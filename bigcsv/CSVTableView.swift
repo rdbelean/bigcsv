@@ -33,7 +33,7 @@ struct CSVTableView: NSViewRepresentable {
 
         private let document: TableDocument
         private weak var tableView: NSTableView?
-        private var builtColumnCount = -1
+        private var builtColumnsVersion = -1
 
         private var lastReloadTime: CFTimeInterval = 0
         private var reloadScheduled = false
@@ -81,8 +81,8 @@ struct CSVTableView: NSViewRepresentable {
         func rebuildColumnsIfNeeded() {
             guard let table = tableView else { return }
             let want = document.columnCount
-            guard want != builtColumnCount, want > 0 else { return }
-            builtColumnCount = want
+            guard document.columnsVersion != builtColumnsVersion, want > 0 else { return }
+            builtColumnsVersion = document.columnsVersion
 
             for column in table.tableColumns { table.removeTableColumn(column) }
 

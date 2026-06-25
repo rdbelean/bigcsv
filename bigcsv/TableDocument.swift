@@ -2,8 +2,9 @@ import Foundation
 import Combine
 
 /// The view-model for one open file: owns the memory map and the streaming line
-/// index, drives the background indexing task, and parses rows on demand (only
-/// the rows the table asks for) with a small cache for the visible window.
+/// index, auto-detects the dialect, drives the background indexing task, and
+/// parses rows on demand (only the rows the table asks for) with a small cache
+/// for the visible window.
 ///
 /// All UI-facing state is `@MainActor`; the heavy indexing runs off-main inside
 /// `LineIndexer` (a `nonisolated` core type) and publishes back here in batches.
@@ -13,16 +14,21 @@ final class TableDocument: ObservableObject {
     let fileURL: URL
     let fileSize: Int
     let mapper: FileMapper
-    let index: RecordIndex
 
     @Published private(set) var dialect: CSVDialect
     @Published private(set) var progress: IndexProgress = .empty
     @Published private(set) var columnTitles: [String] = []
     @Published private(set) var displayRowCount: Int = 0
+    /// Bumped whenever the column model changes (count or titles) so the table
+    /// knows to rebuild its NSTableColumns even if the count is unchanged.
+    @Published private(set) var columnsVersion: Int = 0
+    /// Set when the file is in an encoding we can't byte-index (UTF-16/32).
+    @Published private(set) var unsupportedEncoding: UnsupportedEncoding?
 
     /// Invoked (coalesced by the table view) whenever the indexed row count grows.
     var onIndexUpdate: (() -> Void)?
 
+    private(set) var index: RecordIndex
     private let securityScoped: Bool
     private var indexTask: Task<Void, Never>?
     private var columnsComputed = false
@@ -38,9 +44,19 @@ final class TableDocument: ObservableObject {
         self.mapper = try FileMapper(url: url)
         self.fileSize = mapper.count
         self.index = RecordIndex()
-        self.dialect = .default
-        startIndexing()
+
+        // Auto-detect encoding + delimiter from the first chunk.
+        let sampleLength = min(mapper.count, Detector.sampleByteLimit)
+        let detection = Detector.detect(mapper.bytes(in: 0..<sampleLength))
+        self.dialect = detection.dialect
+        self.unsupportedEncoding = detection.unsupported
+
+        if detection.unsupported == nil {
+            startIndexing()
+        }
     }
+
+    // MARK: Indexing
 
     private func startIndexing() {
         let mapper = self.mapper
@@ -78,18 +94,27 @@ final class TableDocument: ObservableObject {
         }
         guard maxCols > 0 else { return }
         columnsComputed = true
+        setColumnTitles(makeTitles(maxColumns: maxCols, firstRow: firstRow))
+    }
+
+    private func makeTitles(maxColumns: Int, firstRow: [String]) -> [String] {
         if dialect.hasHeader {
-            columnTitles = (0..<maxCols).map { i in
+            return (0..<maxColumns).map { i in
                 (i < firstRow.count && !firstRow[i].isEmpty) ? firstRow[i] : "Column \(i + 1)"
             }
-        } else {
-            columnTitles = (0..<maxCols).map { "Column \($0 + 1)" }
         }
+        return (0..<maxColumns).map { "Column \($0 + 1)" }
+    }
+
+    private func setColumnTitles(_ titles: [String]) {
+        columnTitles = titles
+        columnsVersion += 1
     }
 
     var columnCount: Int { columnTitles.count }
 
-    /// The logical record index for a displayed row (skips the header if present).
+    // MARK: Cells
+
     private func logicalRow(forDisplayRow displayRow: Int) -> Int {
         dialect.hasHeader ? displayRow + 1 : displayRow
     }
@@ -99,6 +124,11 @@ final class TableDocument: ObservableObject {
     func cell(displayRow: Int, column: Int) -> String {
         let fields = parsedRow(logicalRow(forDisplayRow: displayRow))
         return column < fields.count ? fields[column] : ""
+    }
+
+    /// Full field list for a displayed row (used by the cell inspector later).
+    func rowFields(displayRow: Int) -> [String] {
+        parsedRow(logicalRow(forDisplayRow: displayRow))
     }
 
     private func parsedRow(_ row: Int) -> [String] {
@@ -116,8 +146,60 @@ final class TableDocument: ObservableObject {
         return fields
     }
 
-    /// Cancel indexing and release the security scope. Called when this document
-    /// is replaced by another.
+    private func clearRowCache() {
+        rowCache.removeAll(keepingCapacity: true)
+        rowCacheOrder.removeAll(keepingCapacity: true)
+    }
+
+    // MARK: Manual dialect overrides
+
+    /// Change the delimiter — requires a full re-index (record boundaries depend
+    /// on it via quote/field-start tracking).
+    func setDelimiter(_ delimiter: Delimiter) {
+        guard delimiter != dialect.delimiter else { return }
+        dialect.delimiter = delimiter
+        reindex()
+    }
+
+    /// Change the text encoding — no re-index needed (UTF-8 and Windows-1252 are
+    /// byte-compatible for the structural bytes); just re-decode visible cells.
+    func setEncoding(_ encoding: TextEncoding) {
+        guard encoding != dialect.encoding else { return }
+        dialect.encoding = encoding
+        clearRowCache()
+        recomputeColumns()
+        onIndexUpdate?()
+    }
+
+    /// Toggle whether the first record is a header — no re-index, just remap.
+    func setHasHeader(_ hasHeader: Bool) {
+        guard hasHeader != dialect.hasHeader else { return }
+        dialect.hasHeader = hasHeader
+        displayRowCount = dialect.hasHeader ? max(0, index.count - 1) : index.count
+        recomputeColumns()
+        onIndexUpdate?()
+    }
+
+    private func recomputeColumns() {
+        columnsComputed = false
+        clearRowCache()
+        computeColumns()
+    }
+
+    private func reindex() {
+        indexTask?.cancel()
+        index = RecordIndex()
+        columnsComputed = false
+        setColumnTitles([])
+        displayRowCount = 0
+        progress = .empty
+        clearRowCache()
+        startIndexing()
+        onIndexUpdate?()
+    }
+
+    // MARK: Lifecycle
+
     func close() {
         indexTask?.cancel()
         indexTask = nil
@@ -127,8 +209,6 @@ final class TableDocument: ObservableObject {
     }
 
     deinit {
-        // `close()` is the normal teardown path; this is a safety net for the
-        // security scope only (fileURL is immutable and safe to touch here).
         if securityScoped {
             fileURL.stopAccessingSecurityScopedResource()
         }
