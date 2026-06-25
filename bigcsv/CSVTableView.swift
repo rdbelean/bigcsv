@@ -33,6 +33,7 @@ struct CSVTableView: NSViewRepresentable {
 
         private let document: TableDocument
         private weak var tableView: NSTableView?
+        private weak var gutterColumn: NSTableColumn?
         private var builtColumnsVersion = -1
 
         private var lastReloadTime: CFTimeInterval = 0
@@ -106,6 +107,7 @@ struct CSVTableView: NSViewRepresentable {
             gutter.minWidth = 40
             gutter.maxWidth = 200
             table.addTableColumn(gutter)
+            gutterColumn = gutter
 
             for i in 0..<want {
                 let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("\(i)"))
@@ -141,7 +143,15 @@ struct CSVTableView: NSViewRepresentable {
 
         private func performReload() {
             lastReloadTime = CACurrentMediaTime()
+            updateGutterWidth()
             tableView?.noteNumberOfRowsChanged()
+        }
+
+        /// Grow (never shrink) the row-number gutter so large row numbers fit.
+        private func updateGutterWidth() {
+            guard let gutter = gutterColumn else { return }
+            let needed = rowNumberWidth()
+            if gutter.width < needed { gutter.width = needed }
         }
 
         // MARK: NSTableViewDataSource / Delegate
