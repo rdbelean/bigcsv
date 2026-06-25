@@ -33,6 +33,11 @@ struct bigcsvApp: App {
                 Button("Open…") { appModel.presentOpenPanel() }
                     .keyboardShortcut("o", modifiers: .command)
             }
+            CommandGroup(after: .toolbar) {
+                Button("Go to Row…") { appModel.showGoToRow = true }
+                    .keyboardShortcut("l", modifiers: .command)
+                    .disabled(appModel.document == nil)
+            }
         }
     }
 }

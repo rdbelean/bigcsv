@@ -24,14 +24,22 @@ final class TableDocument: ObservableObject {
     @Published private(set) var columnsVersion: Int = 0
     /// Set when the file is in an encoding we can't byte-index (UTF-16/32).
     @Published private(set) var unsupportedEncoding: UnsupportedEncoding?
+    /// True once the file changes on disk under us (guards against SIGBUS).
+    @Published var fileChangedExternally = false
+    /// Display row whose full contents should be shown in the inspector, if any.
+    @Published var inspectedRow: Int?
 
     /// Invoked (coalesced by the table view) whenever the indexed row count grows.
     var onIndexUpdate: (() -> Void)?
+    /// Set by the table view; asks it to scroll a display row into view.
+    var onScrollToRow: ((Int) -> Void)?
 
     private(set) var index: RecordIndex
     private let securityScoped: Bool
     private var indexTask: Task<Void, Never>?
     private var columnsComputed = false
+    private var fileWatchSource: DispatchSourceFileSystemObject?
+    private var watchFD: Int32 = -1
 
     // Small LRU of parsed rows so all columns of a visible row parse once.
     private var rowCache: [Int: [String]] = [:]
@@ -54,6 +62,7 @@ final class TableDocument: ObservableObject {
         if detection.unsupported == nil {
             startIndexing()
         }
+        startWatchingFile()
     }
 
     // MARK: Indexing
@@ -198,11 +207,51 @@ final class TableDocument: ObservableObject {
         onIndexUpdate?()
     }
 
+    // MARK: Navigation & inspection
+
+    /// Scroll a 0-based display row into view (clamped to the available range).
+    func requestScrollToRow(_ displayRow: Int) {
+        guard displayRowCount > 0 else { return }
+        onScrollToRow?(min(max(0, displayRow), displayRowCount - 1))
+    }
+
+    /// Show the full contents of a display row in the inspector.
+    func requestInspector(displayRow: Int) {
+        guard displayRow >= 0, displayRow < displayRowCount else { return }
+        inspectedRow = displayRow
+    }
+
+    // MARK: File-change watch (guards against SIGBUS on truncation/replacement)
+
+    private func startWatchingFile() {
+        watchFD = open(fileURL.path, O_EVTONLY)
+        guard watchFD >= 0 else { return }
+        let source = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: watchFD,
+            eventMask: [.write, .extend, .delete, .rename, .link],
+            queue: .main)
+        source.setEventHandler { [weak self] in
+            MainActor.assumeIsolated { self?.fileChangedExternally = true }
+        }
+        source.setCancelHandler { [weak self] in
+            if let fd = self?.watchFD, fd >= 0 { Darwin.close(fd) }
+        }
+        source.resume()
+        fileWatchSource = source
+    }
+
+    private func stopWatchingFile() {
+        fileWatchSource?.cancel()
+        fileWatchSource = nil
+        watchFD = -1
+    }
+
     // MARK: Lifecycle
 
     func close() {
         indexTask?.cancel()
         indexTask = nil
+        stopWatchingFile()
         if securityScoped {
             fileURL.stopAccessingSecurityScopedResource()
         }

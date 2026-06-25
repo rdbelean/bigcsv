@@ -13,6 +13,14 @@ final class AppModel: ObservableObject {
 
     @Published private(set) var document: TableDocument?
     @Published var errorMessage: String?
+    /// Drives the "Go to Row…" sheet (triggered by ⌘L).
+    @Published var showGoToRow = false
+
+    /// Re-open the current document's file (e.g. after it changed on disk).
+    func reopenCurrent() {
+        guard let url = document?.fileURL else { return }
+        open(url: url)
+    }
 
     /// Open a file URL (from NSOpenPanel, drag-drop, or Finder "Open With").
     /// Replaces any currently open document.

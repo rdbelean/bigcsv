@@ -56,6 +56,8 @@ struct CSVTableView: NSViewRepresentable {
             table.columnAutoresizingStyle = .noColumnAutoresizing
             table.gridStyleMask = [.solidVerticalGridLineMask]
             table.style = .plain
+            table.target = self
+            table.doubleAction = #selector(handleDoubleClick)
             self.tableView = table
 
             let scroll = NSScrollView()
@@ -70,10 +72,21 @@ struct CSVTableView: NSViewRepresentable {
                 self?.rebuildColumnsIfNeeded()
                 self?.scheduleReload(force: self?.document.progress.isComplete ?? false)
             }
+            // Scroll-to-row (⌘L / go-to-row).
+            document.onScrollToRow = { [weak self] row in
+                guard let table = self?.tableView, row >= 0, row < table.numberOfRows else { return }
+                table.scrollRowToVisible(row)
+                table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            }
 
             rebuildColumnsIfNeeded()
             performReload()
             return scroll
+        }
+
+        @objc private func handleDoubleClick() {
+            guard let row = tableView?.clickedRow, row >= 0 else { return }
+            document.requestInspector(displayRow: row)
         }
 
         // MARK: Columns
