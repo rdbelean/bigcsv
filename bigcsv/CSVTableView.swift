@@ -65,7 +65,8 @@ struct CSVTableView: NSViewRepresentable {
             NSBezierPath.strokeLine(from: NSPoint(x: 0, y: y), to: NSPoint(x: bounds.width, y: y))
         }
 
-        func rebuild(columns: [(title: String, width: CGFloat)], height: CGFloat) {
+        func rebuild(columns: [(title: String, width: CGFloat, alignment: NSTextAlignment)],
+                     height: CGFloat, spacing: CGFloat) {
             content.subviews.forEach { $0.removeFromSuperview() }
             var x: CGFloat = 0
             for col in columns {
@@ -73,10 +74,11 @@ struct CSVTableView: NSViewRepresentable {
                 label.font = .systemFont(ofSize: 12, weight: .semibold)
                 label.textColor = .secondaryLabelColor
                 label.lineBreakMode = .byTruncatingTail
-                label.frame = NSRect(x: x + 6, y: (height - 16) / 2,
-                                     width: max(10, col.width - 12), height: 16)
+                label.alignment = col.alignment
+                label.frame = NSRect(x: x + 2, y: (height - 16) / 2,
+                                     width: max(10, col.width - 6), height: 16)
                 content.addSubview(label)
-                x += col.width
+                x += col.width + spacing      // match the table's intercell spacing
             }
             content.frame = NSRect(x: content.frame.origin.x, y: 0, width: x, height: height)
         }
@@ -404,9 +406,11 @@ struct CSVTableView: NSViewRepresentable {
 
         private func rebuildHeader() {
             guard let table = tableView else { return }
-            let cols = table.tableColumns.map { (title: $0.identifier == Self.rowNumberColumnID ? "#" : $0.title,
-                                                 width: $0.width) }
-            headerView?.rebuild(columns: cols, height: headerHeight)
+            let cols = table.tableColumns.map { col -> (title: String, width: CGFloat, alignment: NSTextAlignment) in
+                let isGutter = col.identifier == Self.rowNumberColumnID
+                return (isGutter ? "#" : col.title, col.width, isGutter ? .right : .left)
+            }
+            headerView?.rebuild(columns: cols, height: headerHeight, spacing: table.intercellSpacing.width)
             headerView?.setHorizontalOffset(scrollView?.contentView.bounds.origin.x ?? 0)
         }
 
