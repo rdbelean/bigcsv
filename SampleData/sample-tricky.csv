@@ -1,0 +1,8 @@
+id,name,city,note,amount
+1,Alice,Berlin,"Hello, world",100.50
+2,Bob,"New York","line1
+line2",200.00
+3,Carol,Paris,"She said ""hi""",0
+4,Dave,,,42
+5,Eve,Tokyo,short
+6,Frank,London,"a,b,c",extra,columns,here

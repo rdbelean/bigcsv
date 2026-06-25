@@ -24,3 +24,4 @@ Package.resolved
 # Local test fixtures that are too large to commit (generated big CSVs)
 /SampleData/*.csv
 /SampleData/*.tsv
+!/SampleData/sample-tricky.csv
