@@ -37,12 +37,25 @@ final class TableDocument: ObservableObject {
     @Published var currentMatchIndex = 0
     @Published private(set) var isSearching = false
 
+    /// A transient message to show the user (e.g. a sort limit), shown as an alert.
+    @Published var transientMessage: String?
+
+    // Sort
+    @Published private(set) var sortColumn: Int?
+    @Published private(set) var sortAscending = true
+    @Published private(set) var isSorting = false
+    @Published private(set) var sortProgress: Double = 0
+    /// The most rows we'll sort (extraction is memory-bound); larger files show a message.
+    let sortRowCap = 5_000_000
+
     /// Invoked (coalesced by the table view) whenever the indexed row count grows.
     var onIndexUpdate: (() -> Void)?
     /// Set by the table view; asks it to scroll a display row into view.
     var onScrollToRow: ((Int) -> Void)?
     /// Set by the table view; asks it to repaint visible rows (search highlights).
     var onSearchChanged: (() -> Void)?
+    /// Set by the table view; asks it to rebuild the header (sort indicator) + repaint.
+    var onSortChanged: (() -> Void)?
 
     private(set) var index: RecordIndex
     private let securityScoped: Bool
@@ -52,6 +65,8 @@ final class TableDocument: ObservableObject {
     private var watchFD: Int32 = -1
     private var searchTask: Task<Void, Never>?
     private var didJumpToFirstMatch = false
+    private var sortTask: Task<Void, Never>?
+    private var permutation: [UInt32]?     // sorted display position -> original display row
 
     // Small LRU of parsed rows so all columns of a visible row parse once.
     private var rowCache: [Int: [String]] = [:]
@@ -140,16 +155,26 @@ final class TableDocument: ObservableObject {
         dialect.hasHeader ? displayRow + 1 : displayRow
     }
 
+    /// Map a display position to its underlying display row (identity unless a
+    /// sort permutation is active).
+    private func mappedRow(_ displayRow: Int) -> Int {
+        if let p = permutation, displayRow >= 0, displayRow < p.count { return Int(p[displayRow]) }
+        return displayRow
+    }
+
+    /// The 1-based file row number shown in the gutter (follows the sort).
+    func fileRowNumber(displayRow: Int) -> Int { mappedRow(displayRow) + 1 }
+
     /// Value for one cell, parsed on demand. Out-of-range columns (ragged rows)
     /// return an empty string — never a crash.
     func cell(displayRow: Int, column: Int) -> String {
-        let fields = parsedRow(logicalRow(forDisplayRow: displayRow))
+        let fields = parsedRow(logicalRow(forDisplayRow: mappedRow(displayRow)))
         return column < fields.count ? fields[column] : ""
     }
 
-    /// Full field list for a displayed row (used by the cell inspector later).
+    /// Full field list for a displayed row (used by the cell inspector).
     func rowFields(displayRow: Int) -> [String] {
-        parsedRow(logicalRow(forDisplayRow: displayRow))
+        parsedRow(logicalRow(forDisplayRow: mappedRow(displayRow)))
     }
 
     private func parsedRow(_ row: Int) -> [String] {
@@ -187,6 +212,7 @@ final class TableDocument: ObservableObject {
     func setEncoding(_ encoding: TextEncoding) {
         guard encoding != dialect.encoding else { return }
         dialect.encoding = encoding
+        resetSort()
         clearRowCache()
         recomputeColumns()
         onIndexUpdate?()
@@ -196,9 +222,19 @@ final class TableDocument: ObservableObject {
     func setHasHeader(_ hasHeader: Bool) {
         guard hasHeader != dialect.hasHeader else { return }
         dialect.hasHeader = hasHeader
+        resetSort()
         displayRowCount = dialect.hasHeader ? max(0, index.count - 1) : index.count
         recomputeColumns()
         onIndexUpdate?()
+    }
+
+    /// Drop any active sort (its mapping is invalidated by a re-index / dialect change).
+    private func resetSort() {
+        sortTask?.cancel()
+        sortTask = nil
+        permutation = nil
+        sortColumn = nil
+        isSorting = false
     }
 
     private func recomputeColumns() {
@@ -209,6 +245,7 @@ final class TableDocument: ObservableObject {
 
     private func reindex() {
         indexTask?.cancel()
+        resetSort()
         index = RecordIndex()
         columnsComputed = false
         setColumnTitles([])
@@ -306,6 +343,68 @@ final class TableDocument: ObservableObject {
         onSearchChanged?()
     }
 
+    // MARK: Sort
+
+    /// Sort by a column (click a header). Same column again flips the order.
+    func toggleSort(column: Int) {
+        guard column >= 0, column < columnCount else { return }
+        if displayRowCount > sortRowCap {
+            transientMessage = "Sorting is available for files up to \(sortRowCap.formatted()) rows. "
+                + "This file has \(displayRowCount.formatted()) rows."
+            return
+        }
+        let order: SortEngine.Order
+        if sortColumn == column {
+            order = sortAscending ? .descending : .ascending
+        } else {
+            order = .ascending
+        }
+        sortColumn = column
+        sortAscending = (order == .ascending)
+        clearSearch()
+        onSortChanged?()                // show the indicator immediately
+        runSort(column: column, order: order)
+    }
+
+    func clearSort() {
+        sortTask?.cancel()
+        sortTask = nil
+        permutation = nil
+        sortColumn = nil
+        isSorting = false
+        clearRowCache()
+        onSortChanged?()
+    }
+
+    private func runSort(column: Int, order: SortEngine.Order) {
+        sortTask?.cancel()
+        isSorting = true
+        sortProgress = 0
+        let mapper = self.mapper
+        let index = self.index
+        let dialect = self.dialect
+        let recordOffset = dialect.hasHeader ? 1 : 0
+        let rowCount = displayRowCount
+
+        sortTask = Task {
+            let perm = await SortEngine().sortedPermutation(
+                mapper: mapper, index: index, dialect: dialect,
+                column: column, order: order, recordOffset: recordOffset, rowCount: rowCount,
+                onProgress: { fraction in
+                    Task { @MainActor [weak self] in self?.sortProgress = fraction }
+                })
+            await MainActor.run { [weak self] in self?.applySort(perm) }
+        }
+    }
+
+    private func applySort(_ perm: [UInt32]?) {
+        isSorting = false
+        guard let perm else { return }     // cancelled
+        permutation = perm
+        clearRowCache()
+        onSortChanged?()
+    }
+
     // MARK: File-change watch (guards against SIGBUS on truncation/replacement)
 
     private func startWatchingFile() {
@@ -338,6 +437,8 @@ final class TableDocument: ObservableObject {
         indexTask = nil
         searchTask?.cancel()
         searchTask = nil
+        sortTask?.cancel()
+        sortTask = nil
         stopWatchingFile()
         if securityScoped {
             fileURL.stopAccessingSecurityScopedResource()

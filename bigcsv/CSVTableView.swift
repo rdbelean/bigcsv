@@ -44,10 +44,19 @@ struct CSVTableView: NSViewRepresentable {
         override var acceptsFirstResponder: Bool { true }
     }
 
+    /// NSTableView that copies the selected rows as TSV on ⌘C (Edit ▸ Copy).
+    final class CopyableTableView: NSTableView {
+        weak var coordinator: Coordinator?
+        @objc func copy(_ sender: Any?) { coordinator?.copySelectionToPasteboard() }
+    }
+
     // MARK: - Fixed, horizontally-syncable column header
 
     final class ColumnHeaderView: NSView {
         private let content = NSView()
+        /// Click handler: passes the DATA column index (gutter clicks are ignored).
+        var onColumnClick: ((Int) -> Void)?
+        private var columnRanges: [(start: CGFloat, end: CGFloat, dataIndex: Int)] = []
         override var isFlipped: Bool { true }
 
         override init(frame frameRect: NSRect) {
@@ -56,6 +65,15 @@ struct CSVTableView: NSViewRepresentable {
             addSubview(content)
         }
         required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+        override func mouseDown(with event: NSEvent) {
+            let p = convert(event.locationInWindow, from: nil)
+            let xInContent = p.x - content.frame.origin.x
+            for c in columnRanges where xInContent >= c.start && xInContent < c.end {
+                if c.dataIndex >= 0 { onColumnClick?(c.dataIndex) }
+                return
+            }
+        }
 
         override func draw(_ dirtyRect: NSRect) {
             NSColor.windowBackgroundColor.setFill()
@@ -66,11 +84,15 @@ struct CSVTableView: NSViewRepresentable {
         }
 
         func rebuild(columns: [(title: String, width: CGFloat, alignment: NSTextAlignment)],
-                     height: CGFloat, spacing: CGFloat) {
+                     height: CGFloat, spacing: CGFloat, sortColumn: Int?, ascending: Bool) {
             content.subviews.forEach { $0.removeFromSuperview() }
+            columnRanges.removeAll(keepingCapacity: true)
             var x: CGFloat = 0
-            for col in columns {
-                let label = NSTextField(labelWithString: col.title)
+            for (i, col) in columns.enumerated() {
+                let dataIndex = i - 1                 // column 0 is the gutter
+                var title = col.title
+                if dataIndex >= 0, dataIndex == sortColumn { title += ascending ? "  ▲" : "  ▼" }
+                let label = NSTextField(labelWithString: title)
                 label.font = .systemFont(ofSize: 12, weight: .semibold)
                 label.textColor = .secondaryLabelColor
                 label.lineBreakMode = .byTruncatingTail
@@ -78,6 +100,7 @@ struct CSVTableView: NSViewRepresentable {
                 label.frame = NSRect(x: x + 2, y: (height - 16) / 2,
                                      width: max(10, col.width - 6), height: 16)
                 content.addSubview(label)
+                columnRanges.append((start: x, end: x + col.width, dataIndex: dataIndex))
                 x += col.width + spacing      // match the table's intercell spacing
             }
             content.frame = NSRect(x: content.frame.origin.x, y: 0, width: x, height: height)
@@ -132,7 +155,8 @@ struct CSVTableView: NSViewRepresentable {
         // MARK: View construction
 
         func makeContainer() -> NSView {
-            let table = NSTableView()
+            let table = CopyableTableView()
+            table.coordinator = self
             table.dataSource = self
             table.delegate = self
             table.rowHeight = rowHeight
@@ -207,6 +231,11 @@ struct CSVTableView: NSViewRepresentable {
             }
             document.onScrollToRow = { [weak self] row in self?.revealLogical(row) }
             document.onSearchChanged = { [weak self] in self?.tableView?.reloadData() }
+            document.onSortChanged = { [weak self] in
+                self?.rebuildHeader()
+                self?.tableView?.reloadData()
+            }
+            header.onColumnClick = { [weak self] col in self?.document.toggleSort(column: col) }
 
             rebuildColumnsIfNeeded()
             performReload()
@@ -356,6 +385,17 @@ struct CSVTableView: NSViewRepresentable {
             document.requestInspector(displayRow: logical(row))
         }
 
+        /// Copy the selected rows to the pasteboard as TSV (tab-separated, one row
+        /// per line) — pastes straight into Excel/Numbers.
+        func copySelectionToPasteboard() {
+            guard let table = tableView, !table.selectedRowIndexes.isEmpty else { return }
+            let lines = table.selectedRowIndexes.map { physical -> String in
+                document.rowFields(displayRow: logical(physical)).joined(separator: "\t")
+            }
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(lines.joined(separator: "\n"), forType: .string)
+        }
+
         // MARK: Selection (logical)
 
         func tableViewSelectionDidChange(_ notification: Notification) {
@@ -411,7 +451,8 @@ struct CSVTableView: NSViewRepresentable {
                 let isGutter = col.identifier == Self.rowNumberColumnID
                 return (isGutter ? "#" : col.title, col.width, isGutter ? .right : .left)
             }
-            headerView?.rebuild(columns: cols, height: headerHeight, spacing: table.intercellSpacing.width)
+            headerView?.rebuild(columns: cols, height: headerHeight, spacing: table.intercellSpacing.width,
+                                sortColumn: document.sortColumn, ascending: document.sortAscending)
             headerView?.setHorizontalOffset(scrollView?.contentView.bounds.origin.x ?? 0)
         }
 
@@ -484,7 +525,7 @@ struct CSVTableView: NSViewRepresentable {
             }
 
             if id == Self.rowNumberColumnID {
-                cell.stringValue = "\(logical(row) + 1)"
+                cell.stringValue = "\(document.fileRowNumber(displayRow: logical(row)))"
                 cell.alignment = .right
                 cell.textColor = .secondaryLabelColor
                 cell.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)

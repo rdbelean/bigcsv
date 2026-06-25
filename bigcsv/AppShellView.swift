@@ -74,6 +74,12 @@ struct DocumentView: View {
                 RowInspectorView(document: document, displayRow: row)
             }
         }
+        .alert("Sorting", isPresented: Binding(get: { document.transientMessage != nil },
+                                               set: { if !$0 { document.transientMessage = nil } })) {
+            Button("OK", role: .cancel) { document.transientMessage = nil }
+        } message: {
+            Text(document.transientMessage ?? "")
+        }
     }
 }
 
@@ -319,7 +325,13 @@ struct StatusBarView: View {
             Text(document.dialect.encoding.displayName)
                 .foregroundStyle(.secondary).help("Text encoding")
 
-            if document.unsupportedEncoding != nil {
+            if document.isSorting {
+                HStack(spacing: 8) {
+                    ProgressView(value: document.sortProgress).frame(width: 120)
+                    Text("Sorting… \(Int(document.sortProgress * 100))%")
+                        .foregroundStyle(.secondary).monospacedDigit()
+                }
+            } else if document.unsupportedEncoding != nil {
                 Label("Unsupported encoding", systemImage: "exclamationmark.triangle")
                     .foregroundStyle(.orange)
             } else if !document.progress.isComplete {
