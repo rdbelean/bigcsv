@@ -20,7 +20,7 @@ We are NOT competing with DuckDB / pandas / CLI tools — our buyer does not wan
 2. **Memory-map** the file (raw `mmap`, `PROT_READ`/`MAP_PRIVATE`). NOT `Data(…,.mappedIfSafe)` (it can silently fall back to a full read).
 3. **Lazy record-offset index** built on a background `Task` with progress + total row count. Sparse checkpoint index (offset every K=1024 records) — never a dense per-row array on huge files.
 4. **Parse rows ON DEMAND** — only visible rows the table requests get parsed from the mapped bytes.
-5. Data grid MUST be **NSTableView** wrapped in `NSViewRepresentable` (cell reuse). SwiftUI is only the shell/toolbar/menus/status bar. We use a **windowed-tiling** table (the NSTableView holds only a buffer of physical rows; a custom scroller maps the full logical row range) so 100M+ row files scroll smoothly — vanilla NSTableView geometry degrades past ~tens of millions of rows.
+5. Data grid MUST be **NSTableView** wrapped in `NSViewRepresentable` (cell reuse). SwiftUI is only the shell/toolbar/menus/status bar. **Synthesized-scroll table** (see `CSVTableView`): the NSTableView holds only a small **buffer** (`bufferRows=200_000`) of physical rows = a window onto the file at `windowOrigin`; we OWN the vertical scroll (override `scrollWheel`, accumulate the OS delta/momentum stream into a whole-file `virtualY`, drive the clip + a custom `NSScroller`). Rationale: a tall NSTableView document **crashes** ("Invalid view geometry: width is negative") once rows×rowHeight×backingScale nears 2³¹ device px (~tens of millions of rows on Retina), and native-scroll + recenter **fights** AppKit momentum. The built-in `NSTableHeaderView` mis-positions under manual clip control, so we draw our **own fixed `ColumnHeaderView`** (kept in horizontal sync; matches the table's `intercellSpacing`). Edge-snap so row 1 / last row are reachable.
 6. **CSV correctness**: auto-detect delimiter (`, ; \t |`) and encoding (UTF-8 ±BOM, fallback Windows-1252/Latin-1). Quote handling is **positional** — a `"` opens a quoted field only at field start; `""` is an escaped quote only inside an open quoted field; newlines inside quotes are data, not record boundaries. Ragged/short rows tolerated (`cell(row,col)` past field count → `""`, never traps). UTF-16/32 detected → actionable message, full support deferred.
 7. **Keep the main thread free** — indexing/parsing batches run off-main (nonisolated core), results published to a `@MainActor` model in coalesced batches.
 
@@ -77,7 +77,7 @@ export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 ## Phase status
 - [x] Phase 0 — scaffolding & config
 - [x] Phase 1 — open → mmap → index → first rows (CHECKPOINT 1 PASSED: 1.2 GB / 15M rows, instant open, smooth first-page scroll, correct quoted/embedded-newline/ragged parsing)
-- [ ] Phase 2 — full virtualized (tiling) scroll + delimiter/encoding detection + header toggle + status bar + go-to-row + cell inspector + file-change detection
+- [x] Phase 2 — synthesized-scroll table (smooth over 80M+ rows, no crash) + delimiter/encoding detection + header toggle + full status bar + go-to-row (⌘L) + cell inspector + file-change detection (CHECKPOINT 2 PASSED)
 - [ ] Phase 3 — search + sort + column ops + recent files + dark mode (SHIPPABLE FREE)
 - Phase 4 (StoreKit unlock), Phase 5 (paid features), Phase 6 (signing/notarization/distribution) — later.
 
