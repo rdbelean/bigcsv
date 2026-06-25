@@ -44,7 +44,7 @@ final class TableDocument: ObservableObject {
     // Small LRU of parsed rows so all columns of a visible row parse once.
     private var rowCache: [Int: [String]] = [:]
     private var rowCacheOrder: [Int] = []
-    private let rowCacheLimit = 600
+    private let rowCacheLimit = 2000
 
     init(url: URL, securityScoped: Bool) throws {
         self.fileURL = url
