@@ -21,14 +21,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct bigcsvApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var appModel = AppModel.shared
+    @StateObject private var purchase = PurchaseManager.shared
 
     var body: some Scene {
         // `Window` (not `WindowGroup`) enforces the single-window free model.
         Window("BigCSV", id: "main") {
             AppShellView()
                 .environmentObject(appModel)
+                .environmentObject(purchase)
         }
         .commands {
+            CommandGroup(after: .appInfo) {
+                if purchase.isUnlocked {
+                    Text("BigCSV Pro — Unlocked")
+                } else {
+                    Button("Unlock BigCSV Pro…") { purchase.presentPaywall(.filter) }
+                }
+            }
             CommandGroup(replacing: .newItem) {
                 Button("Open…") { appModel.presentOpenPanel() }
                     .keyboardShortcut("o", modifiers: .command)

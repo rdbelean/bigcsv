@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 /// document view. Accepts file drops anywhere in the window.
 struct AppShellView: View {
     @EnvironmentObject var appModel: AppModel
+    @EnvironmentObject var purchase: PurchaseManager
 
     var body: some View {
         Group {
@@ -36,6 +37,9 @@ struct AppShellView: View {
             Button("OK", role: .cancel) { appModel.errorMessage = nil }
         } message: {
             Text(appModel.errorMessage ?? "")
+        }
+        .sheet(item: $purchase.paywallContext) { context in
+            PaywallView(purchase: purchase, feature: context.feature)
         }
     }
 }
