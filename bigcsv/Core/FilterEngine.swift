@@ -15,7 +15,7 @@ public nonisolated struct FilterEngine: Sendable {
                        filterSet: FilterSet,
                        recordOffset: Int,
                        rowCount: Int,
-                       onMatch: @Sendable (UInt32) -> Void,
+                       onMatch: @Sendable (_ displayRow: UInt32, _ byteOffset: Int) -> Void,
                        onProgress: @Sendable (_ matches: Int, _ fraction: Double, _ isComplete: Bool) -> Void) async {
         guard !filterSet.isEmpty, rowCount > 0 else {
             onProgress(0, 1, true)
@@ -45,7 +45,7 @@ public nonisolated struct FilterEngine: Sendable {
             let record = UnsafeRawBufferPointer(rebasing: bytes[pos..<min(next, n)])
             if filterSet.matches(CSVParser.parseRecord(record, dialect: dialect)) {
                 matches += 1
-                onMatch(UInt32(d))
+                onMatch(UInt32(d), pos)         // pos = this record's byte start
             }
             pos = next
             d += 1

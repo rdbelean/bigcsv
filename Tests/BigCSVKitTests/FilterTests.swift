@@ -103,7 +103,7 @@ struct FilterEngineTests {
         let fs = FilterSet(conditions: [ColumnCondition(column: 1, op: .equals, value: "Tokyo")])
         await FilterEngine().filter(mapper: m, dialect: .default, filterSet: fs,
                                     recordOffset: 1, rowCount: 4,
-                                    onMatch: { c.add($0) },
+                                    onMatch: { row, _ in c.add(row) },
                                     onProgress: { _, _, done in if done { c.finish() } })
         #expect(c.rows == [0, 2])     // display rows 0 (Alice) and 2 (Carol)
         #expect(c.done)
@@ -114,7 +114,7 @@ struct FilterEngineTests {
         let c = Collector()
         await FilterEngine().filter(mapper: m, dialect: .default, filterSet: FilterSet(),
                                     recordOffset: 0, rowCount: 3,
-                                    onMatch: { c.add($0) },
+                                    onMatch: { row, _ in c.add(row) },
                                     onProgress: { _, _, done in if done { c.finish() } })
         #expect(c.rows.isEmpty)       // empty filter handled by caller (identity), engine emits none
     }

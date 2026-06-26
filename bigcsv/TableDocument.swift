@@ -78,6 +78,10 @@ final class TableDocument: ObservableObject {
     private var lastFilterReload: TimeInterval = 0
     /// Maps visible positions to original rows (filter subset + sort order).
     private var projection = RowProjection.identity(totalRows: 0)
+    /// Byte start offsets of the filtered rows, parallel to `projection.base`
+    /// (subset-index space) — lets the filtered view parse directly instead of an
+    /// O(stride) byteRange(forRow:) re-scan per scattered row. nil ⇔ no filter.
+    private var filterOffsets: [Int]?
 
     // Small LRU of parsed rows so all columns of a visible row parse once.
     private var rowCache: [Int: [String]] = [:]
@@ -136,7 +140,7 @@ final class TableDocument: ObservableObject {
         var maxCols = 0
         var firstRow: [String] = []
         for r in 0..<sample {
-            let fields = parsedRow(r)
+            let fields = parsedRecord(r)
             if r == 0 { firstRow = fields }
             maxCols = max(maxCols, fields.count)
         }
@@ -176,31 +180,53 @@ final class TableDocument: ObservableObject {
     /// The 1-based file row number shown in the gutter (follows the sort).
     func fileRowNumber(displayRow: Int) -> Int { mappedRow(displayRow) + 1 }
 
+    /// Byte start offset of the record shown at a visible position. Filtered rows
+    /// use the offset captured during the filter scan (fast); unfiltered rows
+    /// resolve it via the index (the same path the normal table uses).
+    private func byteOffset(forDisplayRow displayRow: Int) -> Int? {
+        if let offsets = filterOffsets {
+            let i = projection.subsetIndex(at: displayRow)
+            return (i >= 0 && i < offsets.count) ? offsets[i] : nil
+        }
+        let record = logicalRow(forDisplayRow: projection.originalRow(at: displayRow))
+        return index.byteRange(forRow: record, mapper: mapper, dialect: dialect)?.lowerBound
+    }
+
     /// Value for one cell, parsed on demand. Out-of-range columns (ragged rows)
     /// return an empty string — never a crash.
     func cell(displayRow: Int, column: Int) -> String {
-        let fields = parsedRow(logicalRow(forDisplayRow: mappedRow(displayRow)))
+        guard let offset = byteOffset(forDisplayRow: displayRow) else { return "" }
+        let fields = parsedRow(atOffset: offset)
         return column < fields.count ? fields[column] : ""
     }
 
     /// Full field list for a displayed row (used by the cell inspector).
     func rowFields(displayRow: Int) -> [String] {
-        parsedRow(logicalRow(forDisplayRow: mappedRow(displayRow)))
+        guard let offset = byteOffset(forDisplayRow: displayRow) else { return [] }
+        return parsedRow(atOffset: offset)
     }
 
-    private func parsedRow(_ row: Int) -> [String] {
-        if let cached = rowCache[row] { return cached }
-        guard let range = index.byteRange(forRow: row, mapper: mapper, dialect: dialect) else {
-            return []
-        }
-        let fields = CSVParser.parseRecord(mapper.bytes(in: range), dialect: dialect)
-        rowCache[row] = fields
-        rowCacheOrder.append(row)
+    /// Parse the record starting at byte `offset` (the cache is keyed by offset,
+    /// which is unique per row and shared by the filtered + unfiltered paths).
+    private func parsedRow(atOffset offset: Int) -> [String] {
+        if let cached = rowCache[offset] { return cached }
+        let bytes = mapper.bytes
+        let end = RecordScanner.nextRecordStart(bytes, from: offset,
+                                                delimiter: dialect.delimiter.byte, quote: dialect.quote)
+        let fields = CSVParser.parseRecord(mapper.bytes(in: offset..<min(end, mapper.count)), dialect: dialect)
+        rowCache[offset] = fields
+        rowCacheOrder.append(offset)
         if rowCacheOrder.count > rowCacheLimit {
             let evicted = rowCacheOrder.removeFirst()
             rowCache.removeValue(forKey: evicted)
         }
         return fields
+    }
+
+    /// Parse a record by its index (used while computing the column model).
+    private func parsedRecord(_ record: Int) -> [String] {
+        guard let range = index.byteRange(forRow: record, mapper: mapper, dialect: dialect) else { return [] }
+        return parsedRow(atOffset: range.lowerBound)
     }
 
     private func clearRowCache() {
@@ -250,6 +276,7 @@ final class TableDocument: ObservableObject {
         filterGeneration += 1
         projection.order = nil
         projection.base = nil
+        filterOffsets = nil
         sortColumn = nil
         isSorting = false
         filterSet = FilterSet()
@@ -454,6 +481,7 @@ final class TableDocument: ObservableObject {
 
         guard !effective.isEmpty else {
             projection.base = nil
+            filterOffsets = nil
             isFiltering = false
             filterProgress = 1
             filterMatchCount = 0
@@ -466,6 +494,7 @@ final class TableDocument: ObservableObject {
         filterProgress = 0
         filterMatchCount = 0
         projection.base = []                 // empty subset; results stream in
+        filterOffsets = []
         displayRowCount = 0
         onProjectionChanged?()
 
@@ -480,7 +509,7 @@ final class TableDocument: ObservableObject {
             await FilterEngine().filter(
                 mapper: mapper, dialect: dialect, filterSet: filterSet,
                 recordOffset: recordOffset, rowCount: rowCount,
-                onMatch: { buffer.append($0) },
+                onMatch: { buffer.append($0, $1) },
                 onProgress: { _, fraction, isComplete in
                     Task { @MainActor [weak self] in
                         self?.flushFilter(buffer, generation: generation,
@@ -503,11 +532,14 @@ final class TableDocument: ObservableObject {
         guard isComplete || now - lastFilterReload > 0.4 else { return }
         lastFilterReload = now
 
-        let result = buffer.snapshot()
-        filterMatchCount = result.count
+        let snap = buffer.snapshot()
+        let everythingMatched = (snap.rows.count == projection.totalRows)
+        filterMatchCount = snap.rows.count
         filterProgress = fraction
-        // base == nil when everything matched (memory: don't store an identity array).
-        projection.base = (result.count == projection.totalRows) ? nil : result
+        // base/offsets == nil when everything matched (no filter; the unfiltered
+        // path is used and we don't store an identity-sized array).
+        projection.base = everythingMatched ? nil : snap.rows
+        filterOffsets = everythingMatched ? nil : snap.offsets
         displayRowCount = projection.count
         if isComplete { isFiltering = false }
         onProjectionChanged?()
@@ -519,6 +551,7 @@ final class TableDocument: ObservableObject {
         filterGeneration += 1
         filterSet = FilterSet()
         projection.base = nil
+        filterOffsets = nil
         isFiltering = false
         filterProgress = 1
         filterMatchCount = 0
@@ -595,26 +628,27 @@ private nonisolated final class MatchBuffer: @unchecked Sendable {
     }
 }
 
-/// Thread-safe accumulator the off-main filter appends matched display rows to.
-/// The main actor reads `count` (cheap) and takes an explicit `snapshot()` copy
-/// when it needs to publish the subset — so the buffer keeps appending without
-/// triggering copy-on-write on the published array.
+/// Thread-safe accumulator the off-main filter appends matches to — each match is
+/// a (display row, byte offset) pair. The main actor reads `count` (cheap) and
+/// takes explicit `snapshot()` copies on throttled ticks, so the buffer keeps
+/// appending without triggering copy-on-write on the published arrays.
 private nonisolated final class IndexBuffer: @unchecked Sendable {
     private let lock = NSLock()
-    private var items: [UInt32] = []
+    private var rows: [UInt32] = []
+    private var offsets: [Int] = []
 
-    func append(_ row: UInt32) {
-        lock.lock(); items.append(row); lock.unlock()
+    func append(_ row: UInt32, _ offset: Int) {
+        lock.lock(); rows.append(row); offsets.append(offset); lock.unlock()
     }
 
     var count: Int {
         lock.lock(); defer { lock.unlock() }
-        return items.count
+        return rows.count
     }
 
-    /// An independent copy of the matches so far (so the buffer can keep growing).
-    func snapshot() -> [UInt32] {
+    /// Independent copies of the matches so far (so the buffer can keep growing).
+    func snapshot() -> (rows: [UInt32], offsets: [Int]) {
         lock.lock(); defer { lock.unlock() }
-        return Array(items)
+        return (Array(rows), Array(offsets))
     }
 }

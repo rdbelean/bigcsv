@@ -31,16 +31,21 @@ public nonisolated struct RowProjection: Sendable, Equatable {
     /// Number of visible rows (filtered count, or all rows when unfiltered).
     public var count: Int { base?.count ?? max(0, totalRows) }
 
+    /// The subset index for a visible `position` (after applying the sort order,
+    /// before mapping through the filter). This is the index into `base` — and
+    /// into any parallel array (e.g. the filter's byte offsets).
+    public func subsetIndex(at position: Int) -> Int {
+        if let order, position >= 0, position < order.count {
+            return Int(order[position])
+        }
+        return position
+    }
+
     /// The original (unfiltered, unsorted) display row shown at visible `position`.
     /// Defensive against a stale `order`/`base` (e.g. the index grew after a sort)
     /// — out-of-range falls back to identity rather than trapping.
     public func originalRow(at position: Int) -> Int {
-        let index: Int
-        if let order, position >= 0, position < order.count {
-            index = Int(order[position])
-        } else {
-            index = position
-        }
+        let index = subsetIndex(at: position)
         if let base, index >= 0, index < base.count {
             return Int(base[index])
         }
