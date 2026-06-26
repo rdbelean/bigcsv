@@ -57,12 +57,19 @@ struct CSVTableView: NSViewRepresentable {
 
     final class ColumnHeaderView: NSView {
         private let content = NSView()
-        /// Click handler: passes the DATA column index (gutter clicks are ignored).
+        /// Sort click: passes the DATA column index (gutter ignored).
         var onColumnClick: ((Int) -> Void)?
-        /// Resize handler: (column index incl. gutter, new width).
-        var onResize: ((_ columnIndex: Int, _ newWidth: CGFloat) -> Void)?
+        /// Resize: (column POSITION incl. gutter, new width).
+        var onResize: ((_ position: Int, _ newWidth: CGFloat) -> Void)?
+        /// Reorder: move the column at POSITION `from` to POSITION `to`.
+        var onReorder: ((_ from: Int, _ to: Int) -> Void)?
+
         private var columnRanges: [(start: CGFloat, end: CGFloat, dataIndex: Int)] = []
         private var resizingIndex: Int?
+        private var pressedIndex: Int?
+        private var pressStartX: CGFloat = 0
+        private var reordering = false
+        private var dropIndicatorX: CGFloat?
         private var trackingArea: NSTrackingArea?
         override var isFlipped: Bool { true }
 
@@ -85,10 +92,12 @@ struct CSVTableView: NSViewRepresentable {
         private func contentX(_ event: NSEvent) -> CGFloat {
             convert(event.locationInWindow, from: nil).x - content.frame.origin.x
         }
-
-        /// Index into `columnRanges` whose right edge is near `x` (a resize grip).
         private func boundary(near x: CGFloat) -> Int? {
             for (i, c) in columnRanges.enumerated() where abs(x - c.end) < 5 { return i }
+            return nil
+        }
+        private func column(at x: CGFloat) -> Int? {
+            for (i, c) in columnRanges.enumerated() where x >= c.start && x < c.end { return i }
             return nil
         }
 
@@ -99,20 +108,42 @@ struct CSVTableView: NSViewRepresentable {
 
         override func mouseDown(with event: NSEvent) {
             let x = contentX(event)
-            if let b = boundary(near: x) { resizingIndex = b; return }   // start a resize drag
-            for c in columnRanges where x >= c.start && x < c.end {
-                if c.dataIndex >= 0 { onColumnClick?(c.dataIndex) }       // a sort click
-                return
-            }
+            if let b = boundary(near: x) { resizingIndex = b; return }
+            pressedIndex = column(at: x)        // decide click vs reorder on mouseUp
+            pressStartX = x
+            reordering = false
         }
 
         override func mouseDragged(with event: NSEvent) {
-            guard let idx = resizingIndex, idx < columnRanges.count else { return }
-            let newWidth = max(40, contentX(event) - columnRanges[idx].start)
-            onResize?(idx, newWidth)                                      // idx == column index (gutter is 0)
+            let x = contentX(event)
+            if let idx = resizingIndex, idx < columnRanges.count {
+                onResize?(idx, max(40, x - columnRanges[idx].start))
+                return
+            }
+            guard let pressed = pressedIndex, columnRanges[pressed].dataIndex >= 0 else { return }
+            if !reordering && abs(x - pressStartX) > 6 { reordering = true }
+            if reordering, let target = column(at: x), columnRanges[target].dataIndex >= 0 {
+                dropIndicatorX = columnRanges[target].start + content.frame.origin.x
+                needsDisplay = true
+            }
         }
 
-        override func mouseUp(with event: NSEvent) { resizingIndex = nil }
+        override func mouseUp(with event: NSEvent) {
+            defer {
+                resizingIndex = nil; pressedIndex = nil; reordering = false
+                dropIndicatorX = nil; needsDisplay = true
+            }
+            if resizingIndex != nil { return }
+            guard let pressed = pressedIndex, columnRanges[pressed].dataIndex >= 0 else { return }
+            if reordering {
+                if let target = column(at: contentX(event)),
+                   columnRanges[target].dataIndex >= 0, target != pressed {
+                    onReorder?(pressed, target)
+                }
+            } else {
+                onColumnClick?(columnRanges[pressed].dataIndex)
+            }
+        }
 
         override func draw(_ dirtyRect: NSRect) {
             NSColor.windowBackgroundColor.setFill()
@@ -120,17 +151,24 @@ struct CSVTableView: NSViewRepresentable {
             NSColor.separatorColor.setStroke()
             let y = bounds.height - 0.5
             NSBezierPath.strokeLine(from: NSPoint(x: 0, y: y), to: NSPoint(x: bounds.width, y: y))
+            if let dx = dropIndicatorX {
+                NSColor.controlAccentColor.setStroke()
+                let line = NSBezierPath()
+                line.lineWidth = 2
+                line.move(to: NSPoint(x: dx, y: 0))
+                line.line(to: NSPoint(x: dx, y: bounds.height))
+                line.stroke()
+            }
         }
 
-        func rebuild(columns: [(title: String, width: CGFloat, alignment: NSTextAlignment)],
+        func rebuild(columns: [(title: String, width: CGFloat, alignment: NSTextAlignment, dataIndex: Int)],
                      height: CGFloat, spacing: CGFloat, sortColumn: Int?, ascending: Bool) {
             content.subviews.forEach { $0.removeFromSuperview() }
             columnRanges.removeAll(keepingCapacity: true)
             var x: CGFloat = 0
-            for (i, col) in columns.enumerated() {
-                let dataIndex = i - 1                 // column 0 is the gutter
+            for col in columns {
                 var title = col.title
-                if dataIndex >= 0, dataIndex == sortColumn { title += ascending ? "  ▲" : "  ▼" }
+                if col.dataIndex >= 0, col.dataIndex == sortColumn { title += ascending ? "  ▲" : "  ▼" }
                 let label = NSTextField(labelWithString: title)
                 label.font = .systemFont(ofSize: 12, weight: .semibold)
                 label.textColor = .secondaryLabelColor
@@ -139,7 +177,7 @@ struct CSVTableView: NSViewRepresentable {
                 label.frame = NSRect(x: x + 2, y: (height - 16) / 2,
                                      width: max(10, col.width - 6), height: 16)
                 content.addSubview(label)
-                columnRanges.append((start: x, end: x + col.width, dataIndex: dataIndex))
+                columnRanges.append((start: x, end: x + col.width, dataIndex: col.dataIndex))
                 x += col.width + spacing      // match the table's intercell spacing
             }
             content.frame = NSRect(x: content.frame.origin.x, y: 0, width: x, height: height)
@@ -282,6 +320,14 @@ struct CSVTableView: NSViewRepresentable {
                 col.width = max(col.minWidth, newWidth)
                 self.rebuildHeader()
                 self.applyVirtual()       // re-sync header offset + horizontal range
+            }
+            header.onReorder = { [weak self] from, to in
+                guard let self, let table = self.tableView,
+                      from >= 1, to >= 1,
+                      from < table.tableColumns.count, to < table.tableColumns.count else { return }
+                table.moveColumn(from, toColumn: to)   // identifiers preserve the data mapping
+                self.rebuildHeader()
+                self.applyVirtual()
             }
 
             rebuildColumnsIfNeeded()
@@ -494,9 +540,9 @@ struct CSVTableView: NSViewRepresentable {
 
         private func rebuildHeader() {
             guard let table = tableView else { return }
-            let cols = table.tableColumns.map { col -> (title: String, width: CGFloat, alignment: NSTextAlignment) in
-                let isGutter = col.identifier == Self.rowNumberColumnID
-                return (isGutter ? "#" : col.title, col.width, isGutter ? .right : .left)
+            let cols = table.tableColumns.map { col -> (title: String, width: CGFloat, alignment: NSTextAlignment, dataIndex: Int) in
+                if col.identifier == Self.rowNumberColumnID { return ("#", col.width, .right, -1) }
+                return (col.title, col.width, .left, Int(col.identifier.rawValue) ?? -1)
             }
             headerView?.rebuild(columns: cols, height: headerHeight, spacing: table.intercellSpacing.width,
                                 sortColumn: document.sortColumn, ascending: document.sortAscending)
