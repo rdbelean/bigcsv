@@ -2,6 +2,13 @@ import SwiftUI
 import StoreKit
 
 /// The unlock sheet, presented when a locked feature is tapped.
+///
+/// Uses StoreKit's SwiftUI `ProductView` for the actual purchase — calling
+/// `product.purchase()` directly from inside a SwiftUI sheet fails on macOS
+/// ("Adding NSRemoteView as a subview of NSHostingView is not supported");
+/// `ProductView` presents the system purchase UI correctly. The resulting
+/// transaction flows through `PurchaseManager`'s `Transaction.updates` listener,
+/// which flips `isUnlocked` and dismisses this sheet.
 struct PaywallView: View {
     @ObservedObject var purchase: PurchaseManager
     let feature: Feature
@@ -30,37 +37,26 @@ struct PaywallView: View {
             }
             .padding(.vertical, 4)
 
-            if case .failed(let message) = purchase.purchaseState {
-                Text(message).font(.caption).foregroundStyle(.red).multilineTextAlignment(.center)
+            ProductView(id: PurchaseManager.productID) {
+                Image(systemName: "tablecells")
+                    .font(.title)
+                    .foregroundStyle(.tint)
             }
-
-            Button { Task { await purchase.purchase() } } label: {
-                Text(buyTitle).frame(maxWidth: .infinity)
+            .productViewStyle(.compact)
+            .onInAppPurchaseCompletion { _, result in
+                if case .success(.success) = result {
+                    await purchase.refreshEntitlements()
+                }
             }
-            .controlSize(.large)
-            .buttonStyle(.borderedProminent)
-            .disabled(isBusy)
 
             Button("Restore Purchases") { Task { await purchase.restore() } }
-                .disabled(isBusy)
             Button("Not now") { dismiss() }
                 .buttonStyle(.link)
         }
         .padding(28)
         .frame(width: 430)
-    }
-
-    private var isBusy: Bool {
-        purchase.purchaseState == .purchasing || purchase.purchaseState == .restoring
-    }
-
-    private var buyTitle: String {
-        switch purchase.purchaseState {
-        case .purchasing: return "Purchasing…"
-        case .restoring: return "Restoring…"
-        default:
-            if let product = purchase.product { return "Unlock Pro — \(product.displayPrice)" }
-            return "Unlock Pro"
+        .onChange(of: purchase.isUnlocked) { _, unlocked in
+            if unlocked { dismiss() }
         }
     }
 
