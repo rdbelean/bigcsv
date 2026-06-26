@@ -75,7 +75,6 @@ final class TableDocument: ObservableObject {
     private var sortTask: Task<Void, Never>?
     private var filterTask: Task<Void, Never>?
     private var filterGeneration = 0
-    private var filterBuilding: [UInt32] = []
     private var lastFilterReload: TimeInterval = 0
     /// Maps visible positions to original rows (filter subset + sort order).
     private var projection = RowProjection.identity(totalRows: 0)
@@ -254,7 +253,6 @@ final class TableDocument: ObservableObject {
         sortColumn = nil
         isSorting = false
         filterSet = FilterSet()
-        filterBuilding = []
         isFiltering = false
         filterProgress = 1
         filterMatchCount = 0
@@ -444,7 +442,6 @@ final class TableDocument: ObservableObject {
         projection.order = nil
         sortColumn = nil
         isSorting = false
-        filterBuilding = []
         lastFilterReload = 0
 
         // Ignore conditions still being typed (need a value but have none) — they
@@ -497,19 +494,21 @@ final class TableDocument: ObservableObject {
     private func flushFilter(_ buffer: IndexBuffer, generation: Int,
                             fraction: Double, isComplete: Bool) {
         guard generation == filterGeneration else { return }     // a newer run supersedes this
-        filterBuilding.append(contentsOf: buffer.drainNew())     // cheap, every tick
 
-        // Coalesce the expensive @Published / table-reload work to ~3 Hz (plus the
-        // final flush). Without this, filtering a 15M-row file fires ~900 reloads
-        // and stutters / blocks the UI.
+        // Coalesce to ~2.5 Hz (plus the final flush). The matches are accumulated
+        // OFF-main in `buffer`; we only take an explicit copy here on the throttled
+        // ticks. (The old code appended on the main thread into the array
+        // `projection.base` referenced — copy-on-write copied the whole growing
+        // array on every one of ~900 ticks → gigabytes of main-thread copying.)
         let now = ProcessInfo.processInfo.systemUptime
-        guard isComplete || now - lastFilterReload > 0.33 else { return }
+        guard isComplete || now - lastFilterReload > 0.4 else { return }
         lastFilterReload = now
 
-        // base == nil when everything matched (memory: don't store an identity array).
-        projection.base = (filterBuilding.count == projection.totalRows) ? nil : filterBuilding
-        filterMatchCount = filterBuilding.count
+        let result = buffer.snapshot()
+        filterMatchCount = result.count
         filterProgress = fraction
+        // base == nil when everything matched (memory: don't store an identity array).
+        projection.base = (result.count == projection.totalRows) ? nil : result
         displayRowCount = projection.count
         if isComplete { isFiltering = false }
         onProjectionChanged?()
@@ -520,7 +519,6 @@ final class TableDocument: ObservableObject {
         filterTask = nil
         filterGeneration += 1
         filterSet = FilterSet()
-        filterBuilding = []
         projection.base = nil
         isFiltering = false
         filterProgress = 1
@@ -599,20 +597,25 @@ private nonisolated final class MatchBuffer: @unchecked Sendable {
 }
 
 /// Thread-safe accumulator the off-main filter appends matched display rows to.
+/// The main actor reads `count` (cheap) and takes an explicit `snapshot()` copy
+/// when it needs to publish the subset — so the buffer keeps appending without
+/// triggering copy-on-write on the published array.
 private nonisolated final class IndexBuffer: @unchecked Sendable {
     private let lock = NSLock()
     private var items: [UInt32] = []
-    private var drained = 0
 
     func append(_ row: UInt32) {
         lock.lock(); items.append(row); lock.unlock()
     }
 
-    func drainNew() -> [UInt32] {
+    var count: Int {
         lock.lock(); defer { lock.unlock() }
-        guard drained < items.count else { return [] }
-        let new = Array(items[drained...])
-        drained = items.count
-        return new
+        return items.count
+    }
+
+    /// An independent copy of the matches so far (so the buffer can keep growing).
+    func snapshot() -> [UInt32] {
+        lock.lock(); defer { lock.unlock() }
+        return Array(items)
     }
 }

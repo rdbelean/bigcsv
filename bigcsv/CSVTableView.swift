@@ -311,11 +311,11 @@ struct CSVTableView: NSViewRepresentable {
             document.onProjectionChanged = { [weak self] in
                 guard let self else { return }
                 self.rebuildHeader()
-                // The visible row set changed (sort order / filtered count) — reset
-                // to the top, repaint, and re-sync the scroller to the new count.
-                self.windowOrigin = 0
-                self.virtualY = 0
-                self.selectedLogical = []
+                // The visible row set changed (sort order / filtered count). Keep the
+                // scroll position (clamped to the new count) so streaming filter
+                // results don't yank the view to the top on every update; repaint
+                // and re-sync the scroller.
+                self.virtualY = min(self.virtualY, self.maxVirtualY())
                 self.tableView?.reloadData()
                 self.applyVirtual()
             }
