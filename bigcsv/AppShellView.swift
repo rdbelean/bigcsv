@@ -50,6 +50,7 @@ struct AppShellView: View {
 struct DocumentView: View {
     @ObservedObject var document: TableDocument
     @EnvironmentObject var appModel: AppModel
+    @EnvironmentObject var purchase: PurchaseManager
 
     var body: some View {
         VStack(spacing: 0) {
@@ -58,6 +59,10 @@ struct DocumentView: View {
             }
             if document.findBarVisible {
                 FindBar(document: document)
+                Divider()
+            }
+            if document.filterBarVisible {
+                FilterBar(document: document)
                 Divider()
             }
             if let unsupported = document.unsupportedEncoding {
@@ -70,7 +75,19 @@ struct DocumentView: View {
             Divider()
             StatusBarView(document: document)
         }
-        .toolbar { FormatMenu(document: document) }
+        .toolbar {
+            FormatMenu(document: document)
+            ToolbarItem {
+                Button {
+                    purchase.requireUnlock(.filter) { document.filterBarVisible.toggle() }
+                } label: {
+                    Label("Filter", systemImage: document.filterSet.isEmpty
+                          ? "line.3.horizontal.decrease.circle"
+                          : "line.3.horizontal.decrease.circle.fill")
+                }
+                .help(purchase.isUnlocked ? "Filter rows" : "Filter rows (Pro)")
+            }
+        }
         .sheet(isPresented: $appModel.showGoToRow) {
             GoToRowSheet(document: document)
         }

@@ -30,7 +30,7 @@ struct CSVTableView: NSViewRepresentable {
 
     func updateNSView(_ nsView: NSView, context: Context) {
         // Data changes flow through the document's callbacks (onIndexUpdate /
-        // onSearchChanged / onSortChanged). Avoid a forced reload here — it would
+        // onSearchChanged / onProjectionChanged). Avoid a forced reload here — it would
         // fire on every @Published change (e.g. streaming match counts) and stutter
         // scrolling. Only make sure the columns exist.
         context.coordinator.rebuildColumnsIfNeeded()
@@ -308,9 +308,16 @@ struct CSVTableView: NSViewRepresentable {
             }
             document.onScrollToRow = { [weak self] row in self?.revealLogical(row) }
             document.onSearchChanged = { [weak self] in self?.tableView?.reloadData() }
-            document.onSortChanged = { [weak self] in
-                self?.rebuildHeader()
-                self?.tableView?.reloadData()
+            document.onProjectionChanged = { [weak self] in
+                guard let self else { return }
+                self.rebuildHeader()
+                // The visible row set changed (sort order / filtered count) — reset
+                // to the top, repaint, and re-sync the scroller to the new count.
+                self.windowOrigin = 0
+                self.virtualY = 0
+                self.selectedLogical = []
+                self.tableView?.reloadData()
+                self.applyVirtual()
             }
             header.onColumnClick = { [weak self] col in self?.document.toggleSort(column: col) }
             header.onResize = { [weak self] columnIndex, newWidth in

@@ -48,6 +48,13 @@ final class TableDocument: ObservableObject {
     /// The most rows we'll sort (extraction is memory-bound); larger files show a message.
     let sortRowCap = 5_000_000
 
+    // Filter
+    @Published var filterSet = FilterSet()
+    @Published var filterBarVisible = false
+    @Published private(set) var isFiltering = false
+    @Published private(set) var filterProgress: Double = 0
+    @Published private(set) var filterMatchCount = 0
+
     /// Invoked (coalesced by the table view) whenever the indexed row count grows.
     var onIndexUpdate: (() -> Void)?
     /// Set by the table view; asks it to scroll a display row into view.
@@ -55,7 +62,7 @@ final class TableDocument: ObservableObject {
     /// Set by the table view; asks it to repaint visible rows (search highlights).
     var onSearchChanged: (() -> Void)?
     /// Set by the table view; asks it to rebuild the header (sort indicator) + repaint.
-    var onSortChanged: (() -> Void)?
+    var onProjectionChanged: (() -> Void)?
 
     private(set) var index: RecordIndex
     private let securityScoped: Bool
@@ -66,6 +73,9 @@ final class TableDocument: ObservableObject {
     private var searchTask: Task<Void, Never>?
     private var didJumpToFirstMatch = false
     private var sortTask: Task<Void, Never>?
+    private var filterTask: Task<Void, Never>?
+    private var filterGeneration = 0
+    private var filterBuilding: [UInt32] = []
     /// Maps visible positions to original rows (filter subset + sort order).
     private var projection = RowProjection.identity(totalRows: 0)
 
@@ -213,7 +223,7 @@ final class TableDocument: ObservableObject {
     func setEncoding(_ encoding: TextEncoding) {
         guard encoding != dialect.encoding else { return }
         dialect.encoding = encoding
-        resetSort()
+        resetProjection()
         clearRowCache()
         recomputeColumns()
         onIndexUpdate?()
@@ -223,20 +233,30 @@ final class TableDocument: ObservableObject {
     func setHasHeader(_ hasHeader: Bool) {
         guard hasHeader != dialect.hasHeader else { return }
         dialect.hasHeader = hasHeader
-        resetSort()
+        resetProjection()
         projection.totalRows = dialect.hasHeader ? max(0, index.count - 1) : index.count
         displayRowCount = projection.count
         recomputeColumns()
         onIndexUpdate?()
     }
 
-    /// Drop any active sort (its mapping is invalidated by a re-index / dialect change).
-    private func resetSort() {
+    /// Drop any active sort AND filter — their mappings are invalidated by a
+    /// re-index / dialect / header change.
+    private func resetProjection() {
         sortTask?.cancel()
         sortTask = nil
+        filterTask?.cancel()
+        filterTask = nil
+        filterGeneration += 1
         projection.order = nil
+        projection.base = nil
         sortColumn = nil
         isSorting = false
+        filterSet = FilterSet()
+        filterBuilding = []
+        isFiltering = false
+        filterProgress = 1
+        filterMatchCount = 0
     }
 
     private func recomputeColumns() {
@@ -247,7 +267,7 @@ final class TableDocument: ObservableObject {
 
     private func reindex() {
         indexTask?.cancel()
-        resetSort()
+        resetProjection()
         projection = .identity(totalRows: 0)
         index = RecordIndex()
         columnsComputed = false
@@ -366,7 +386,7 @@ final class TableDocument: ObservableObject {
         sortColumn = column
         sortAscending = (order == .ascending)
         clearSearch()
-        onSortChanged?()                // show the indicator immediately
+        onProjectionChanged?()                // show the indicator immediately
         runSort(column: column, order: order)
     }
 
@@ -377,7 +397,7 @@ final class TableDocument: ObservableObject {
         sortColumn = nil
         isSorting = false
         clearRowCache()
-        onSortChanged?()
+        onProjectionChanged?()
     }
 
     private func runSort(column: Int, order: SortEngine.Order) {
@@ -406,7 +426,89 @@ final class TableDocument: ObservableObject {
         guard let perm else { return }     // cancelled
         projection.order = perm
         clearRowCache()
-        onSortChanged?()
+        onProjectionChanged?()
+    }
+
+    // MARK: Filter
+
+    /// (Re)apply the current `filterSet`. Streams matching rows into the
+    /// projection's `base` subset, off-main, cancellable, generation-tagged so a
+    /// fast sequence of edits never lets a stale run overwrite a newer one.
+    func applyFilter() {
+        filterTask?.cancel()
+        filterGeneration += 1
+        let generation = filterGeneration
+        clearSearch()
+        // Filter-only for now: any active sort is dropped (composition is Slice 3).
+        projection.order = nil
+        sortColumn = nil
+        isSorting = false
+        filterBuilding = []
+
+        guard !filterSet.isEmpty else {
+            projection.base = nil
+            isFiltering = false
+            filterProgress = 1
+            filterMatchCount = 0
+            displayRowCount = projection.count
+            onProjectionChanged?()
+            return
+        }
+
+        isFiltering = true
+        filterProgress = 0
+        filterMatchCount = 0
+        projection.base = []                 // empty subset; results stream in
+        displayRowCount = 0
+        onProjectionChanged?()
+
+        let mapper = self.mapper
+        let index = self.index
+        let dialect = self.dialect
+        let recordOffset = dialect.hasHeader ? 1 : 0
+        let rowCount = projection.totalRows
+        let filterSet = self.filterSet
+        let buffer = IndexBuffer()
+
+        filterTask = Task {
+            await FilterEngine().filter(
+                mapper: mapper, index: index, dialect: dialect, filterSet: filterSet,
+                recordOffset: recordOffset, rowCount: rowCount,
+                onMatch: { buffer.append($0) },
+                onProgress: { _, fraction, isComplete in
+                    Task { @MainActor [weak self] in
+                        self?.flushFilter(buffer, generation: generation,
+                                          fraction: fraction, isComplete: isComplete)
+                    }
+                })
+        }
+    }
+
+    private func flushFilter(_ buffer: IndexBuffer, generation: Int,
+                            fraction: Double, isComplete: Bool) {
+        guard generation == filterGeneration else { return }     // a newer run supersedes this
+        filterBuilding.append(contentsOf: buffer.drainNew())
+        // base == nil when everything matched (memory: don't store an identity array).
+        projection.base = (filterBuilding.count == projection.totalRows) ? nil : filterBuilding
+        filterMatchCount = filterBuilding.count
+        filterProgress = fraction
+        displayRowCount = projection.count
+        if isComplete { isFiltering = false }
+        onProjectionChanged?()
+    }
+
+    func clearFilter() {
+        filterTask?.cancel()
+        filterTask = nil
+        filterGeneration += 1
+        filterSet = FilterSet()
+        filterBuilding = []
+        projection.base = nil
+        isFiltering = false
+        filterProgress = 1
+        filterMatchCount = 0
+        displayRowCount = projection.count
+        onProjectionChanged?()
     }
 
     // MARK: File-change watch (guards against SIGBUS on truncation/replacement)
@@ -443,6 +545,8 @@ final class TableDocument: ObservableObject {
         searchTask = nil
         sortTask?.cancel()
         sortTask = nil
+        filterTask?.cancel()
+        filterTask = nil
         stopWatchingFile()
         if securityScoped {
             fileURL.stopAccessingSecurityScopedResource()
@@ -468,6 +572,25 @@ private nonisolated final class MatchBuffer: @unchecked Sendable {
     }
 
     func drainNew() -> [Int] {
+        lock.lock(); defer { lock.unlock() }
+        guard drained < items.count else { return [] }
+        let new = Array(items[drained...])
+        drained = items.count
+        return new
+    }
+}
+
+/// Thread-safe accumulator the off-main filter appends matched display rows to.
+private nonisolated final class IndexBuffer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var items: [UInt32] = []
+    private var drained = 0
+
+    func append(_ row: UInt32) {
+        lock.lock(); items.append(row); lock.unlock()
+    }
+
+    func drainNew() -> [UInt32] {
         lock.lock(); defer { lock.unlock() }
         guard drained < items.count else { return [] }
         let new = Array(items[drained...])
