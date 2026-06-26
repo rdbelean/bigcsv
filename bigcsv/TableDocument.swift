@@ -66,7 +66,8 @@ final class TableDocument: ObservableObject {
     private var searchTask: Task<Void, Never>?
     private var didJumpToFirstMatch = false
     private var sortTask: Task<Void, Never>?
-    private var permutation: [UInt32]?     // sorted display position -> original display row
+    /// Maps visible positions to original rows (filter subset + sort order).
+    private var projection = RowProjection.identity(totalRows: 0)
 
     // Small LRU of parsed rows so all columns of a visible row parse once.
     private var rowCache: [Int: [String]] = [:]
@@ -112,7 +113,8 @@ final class TableDocument: ObservableObject {
     private func applyProgress(_ p: IndexProgress) {
         progress = p
         if !columnsComputed && index.count > 0 { computeColumns() }
-        displayRowCount = dialect.hasHeader ? max(0, index.count - 1) : index.count
+        projection.totalRows = dialect.hasHeader ? max(0, index.count - 1) : index.count
+        displayRowCount = projection.count
         onIndexUpdate?()
     }
 
@@ -158,8 +160,7 @@ final class TableDocument: ObservableObject {
     /// Map a display position to its underlying display row (identity unless a
     /// sort permutation is active).
     private func mappedRow(_ displayRow: Int) -> Int {
-        if let p = permutation, displayRow >= 0, displayRow < p.count { return Int(p[displayRow]) }
-        return displayRow
+        projection.originalRow(at: displayRow)
     }
 
     /// The 1-based file row number shown in the gutter (follows the sort).
@@ -223,7 +224,8 @@ final class TableDocument: ObservableObject {
         guard hasHeader != dialect.hasHeader else { return }
         dialect.hasHeader = hasHeader
         resetSort()
-        displayRowCount = dialect.hasHeader ? max(0, index.count - 1) : index.count
+        projection.totalRows = dialect.hasHeader ? max(0, index.count - 1) : index.count
+        displayRowCount = projection.count
         recomputeColumns()
         onIndexUpdate?()
     }
@@ -232,7 +234,7 @@ final class TableDocument: ObservableObject {
     private func resetSort() {
         sortTask?.cancel()
         sortTask = nil
-        permutation = nil
+        projection.order = nil
         sortColumn = nil
         isSorting = false
     }
@@ -246,6 +248,7 @@ final class TableDocument: ObservableObject {
     private func reindex() {
         indexTask?.cancel()
         resetSort()
+        projection = .identity(totalRows: 0)
         index = RecordIndex()
         columnsComputed = false
         setColumnTitles([])
@@ -370,7 +373,7 @@ final class TableDocument: ObservableObject {
     func clearSort() {
         sortTask?.cancel()
         sortTask = nil
-        permutation = nil
+        projection.order = nil
         sortColumn = nil
         isSorting = false
         clearRowCache()
@@ -401,7 +404,7 @@ final class TableDocument: ObservableObject {
     private func applySort(_ perm: [UInt32]?) {
         isSorting = false
         guard let perm else { return }     // cancelled
-        permutation = perm
+        projection.order = perm
         clearRowCache()
         onSortChanged?()
     }
