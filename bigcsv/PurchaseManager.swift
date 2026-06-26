@@ -89,7 +89,12 @@ final class PurchaseManager: ObservableObject {
     }
 
     func purchase() async {
-        guard let product else { await loadProduct(); return }
+        if product == nil { await loadProduct() }
+        guard let product else {
+            purchaseState = .failed("Couldn’t load the product. In Xcode: Edit Scheme → Run → "
+                + "Options → StoreKit Configuration → select BigCSV.storekit.")
+            return
+        }
         purchaseState = .purchasing
         do {
             switch try await product.purchase() {
