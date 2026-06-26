@@ -69,22 +69,12 @@ public nonisolated struct SortEngine: Sendable {
         return perm
     }
 
-    /// A value with empties/non-numbers sorted to the end (+∞).
+    /// A value with empties/non-numbers sorted to the end (+∞). Locale-aware.
     static func numericValue(_ s: String) -> Double {
-        let trimmed = s.trimmingCharacters(in: .whitespaces)
-        if trimmed.isEmpty { return .infinity }
-        return Double(trimmed) ?? .infinity
+        NumberParsing.parse(s) ?? .infinity
     }
 
     static func isNumericColumn(_ keys: [String]) -> Bool {
-        var checked = 0, numeric = 0
-        for k in keys {
-            let t = k.trimmingCharacters(in: .whitespaces)
-            if t.isEmpty { continue }
-            checked += 1
-            if Double(t) != nil { numeric += 1 }
-            if checked >= 200 { break }
-        }
-        return checked > 0 && Double(numeric) / Double(checked) >= 0.8
+        NumberParsing.isNumericColumn(keys)
     }
 }
