@@ -97,11 +97,11 @@ struct FilterEngineTests {
 
     @Test func filtersMatchingDisplayRows() async throws {
         // header + 4 data rows; filter city == Tokyo (column 1).
-        let (m, idx) = try await TestSupport.buildIndex(
+        let (m, _) = try await TestSupport.buildIndex(
             "name,city\nAlice,Tokyo\nBob,Paris\nCarol,Tokyo\nDave,Berlin\n", stride: 2)
         let c = Collector()
         let fs = FilterSet(conditions: [ColumnCondition(column: 1, op: .equals, value: "Tokyo")])
-        await FilterEngine().filter(mapper: m, index: idx, dialect: .default, filterSet: fs,
+        await FilterEngine().filter(mapper: m, dialect: .default, filterSet: fs,
                                     recordOffset: 1, rowCount: 4,
                                     onMatch: { c.add($0) },
                                     onProgress: { _, _, done in if done { c.finish() } })
@@ -110,9 +110,9 @@ struct FilterEngineTests {
     }
 
     @Test func emptyFilterYieldsNothing() async throws {
-        let (m, idx) = try await TestSupport.buildIndex("a\nb\nc\n", stride: 2)
+        let (m, _) = try await TestSupport.buildIndex("a\nb\nc\n", stride: 2)
         let c = Collector()
-        await FilterEngine().filter(mapper: m, index: idx, dialect: .default, filterSet: FilterSet(),
+        await FilterEngine().filter(mapper: m, dialect: .default, filterSet: FilterSet(),
                                     recordOffset: 0, rowCount: 3,
                                     onMatch: { c.add($0) },
                                     onProgress: { _, _, done in if done { c.finish() } })

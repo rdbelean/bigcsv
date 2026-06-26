@@ -470,7 +470,6 @@ final class TableDocument: ObservableObject {
         onProjectionChanged?()
 
         let mapper = self.mapper
-        let index = self.index
         let dialect = self.dialect
         let recordOffset = dialect.hasHeader ? 1 : 0
         let rowCount = projection.totalRows
@@ -479,7 +478,7 @@ final class TableDocument: ObservableObject {
 
         filterTask = Task {
             await FilterEngine().filter(
-                mapper: mapper, index: index, dialect: dialect, filterSet: filterSet,
+                mapper: mapper, dialect: dialect, filterSet: filterSet,
                 recordOffset: recordOffset, rowCount: rowCount,
                 onMatch: { buffer.append($0) },
                 onProgress: { _, fraction, isComplete in

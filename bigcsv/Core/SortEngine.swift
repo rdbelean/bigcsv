@@ -25,24 +25,39 @@ public nonisolated struct SortEngine: Sendable {
                                   rowCount: Int,
                                   onProgress: @Sendable (Double) -> Void) async -> [UInt32]? {
         guard rowCount > 0 else { return [] }
+        _ = index   // (boundaries are re-derived by a single sequential scan below)
 
-        // 1) Extract the column key for every row.
+        // 1) Extract the column key for every row in ONE sequential pass over the
+        // mapped bytes — NOT index.byteRange(forRow:) per row, which re-scans from
+        // the nearest checkpoint each call and is quadratic over a full scan.
+        let bytes = mapper.bytes
+        let n = bytes.count
+        let delimiter = dialect.delimiter.byte
+        let quote = dialect.quote
+        var pos = RecordScanner.utf8BOMLength(bytes)
+        var skipped = 0
+        while skipped < recordOffset && pos < n {
+            pos = RecordScanner.nextRecordStart(bytes, from: pos, delimiter: delimiter, quote: quote)
+            skipped += 1
+        }
+
         var keys = [String]()
         keys.reserveCapacity(rowCount)
-        for d in 0..<rowCount {
+        var d = 0
+        while pos < n && d < rowCount {
             if Task.isCancelled { return nil }
-            let record = recordOffset + d
-            if let range = index.byteRange(forRow: record, mapper: mapper, dialect: dialect) {
-                let fields = CSVParser.parseRecord(mapper.bytes(in: range), dialect: dialect)
-                keys.append(column < fields.count ? fields[column] : "")
-            } else {
-                keys.append("")
-            }
+            let next = RecordScanner.nextRecordStart(bytes, from: pos, delimiter: delimiter, quote: quote)
+            let fields = CSVParser.parseRecord(
+                UnsafeRawBufferPointer(rebasing: bytes[pos..<min(next, n)]), dialect: dialect)
+            keys.append(column < fields.count ? fields[column] : "")
+            pos = next
+            d += 1
             if d & 0xFFFF == 0 {
                 onProgress(Double(d) / Double(rowCount))
                 await Task.yield()
             }
         }
+        while keys.count < rowCount { keys.append("") }    // tolerate a short tail
         if Task.isCancelled { return nil }
 
         // 2) Numeric column? (most non-empty values parse as a number)
