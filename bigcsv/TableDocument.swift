@@ -76,6 +76,7 @@ final class TableDocument: ObservableObject {
     private var filterTask: Task<Void, Never>?
     private var filterGeneration = 0
     private var filterBuilding: [UInt32] = []
+    private var lastFilterReload: TimeInterval = 0
     /// Maps visible positions to original rows (filter subset + sort order).
     private var projection = RowProjection.identity(totalRows: 0)
 
@@ -444,8 +445,17 @@ final class TableDocument: ObservableObject {
         sortColumn = nil
         isSorting = false
         filterBuilding = []
+        lastFilterReload = 0
 
-        guard !filterSet.isEmpty else {
+        // Ignore conditions still being typed (need a value but have none) — they
+        // match every row, so without this just opening the bar would full-scan.
+        let effective = FilterSet(
+            combinator: filterSet.combinator,
+            conditions: filterSet.conditions.filter {
+                !$0.op.needsValue || !$0.value.trimmingCharacters(in: .whitespaces).isEmpty
+            })
+
+        guard !effective.isEmpty else {
             projection.base = nil
             isFiltering = false
             filterProgress = 1
@@ -467,7 +477,7 @@ final class TableDocument: ObservableObject {
         let dialect = self.dialect
         let recordOffset = dialect.hasHeader ? 1 : 0
         let rowCount = projection.totalRows
-        let filterSet = self.filterSet
+        let filterSet = effective
         let buffer = IndexBuffer()
 
         filterTask = Task {
@@ -487,7 +497,15 @@ final class TableDocument: ObservableObject {
     private func flushFilter(_ buffer: IndexBuffer, generation: Int,
                             fraction: Double, isComplete: Bool) {
         guard generation == filterGeneration else { return }     // a newer run supersedes this
-        filterBuilding.append(contentsOf: buffer.drainNew())
+        filterBuilding.append(contentsOf: buffer.drainNew())     // cheap, every tick
+
+        // Coalesce the expensive @Published / table-reload work to ~3 Hz (plus the
+        // final flush). Without this, filtering a 15M-row file fires ~900 reloads
+        // and stutters / blocks the UI.
+        let now = ProcessInfo.processInfo.systemUptime
+        guard isComplete || now - lastFilterReload > 0.33 else { return }
+        lastFilterReload = now
+
         // base == nil when everything matched (memory: don't store an identity array).
         projection.base = (filterBuilding.count == projection.totalRows) ? nil : filterBuilding
         filterMatchCount = filterBuilding.count
