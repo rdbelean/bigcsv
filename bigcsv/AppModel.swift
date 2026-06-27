@@ -15,6 +15,8 @@ final class AppModel: ObservableObject {
     @Published var errorMessage: String?
     /// Drives the "Go to Row…" sheet (triggered by ⌘L).
     @Published var showGoToRow = false
+    /// Drives the "Go to Column…" sheet.
+    @Published var showGoToColumn = false
     /// Recently opened files (Open Recent menu), persisted via security bookmarks.
     @Published private(set) var recentFiles: [RecentFile] = Bookmarks.load()
     /// Named, reusable filters (Pro), persisted in UserDefaults.

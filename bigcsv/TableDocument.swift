@@ -22,6 +22,11 @@ final class TableDocument: ObservableObject {
     /// Bumped whenever the column model changes (count or titles) so the table
     /// knows to rebuild its NSTableColumns even if the count is unchanged.
     @Published private(set) var columnsVersion: Int = 0
+    /// Number of leading columns (in display order) frozen in place while scrolling
+    /// horizontally (Pro). 0 = none.
+    @Published var frozenColumnCount: Int = 0 {
+        didSet { if frozenColumnCount != oldValue { onProjectionChanged?() } }
+    }
     /// Set when the file is in an encoding we can't byte-index (UTF-16/32).
     @Published private(set) var unsupportedEncoding: UnsupportedEncoding?
     /// True once the file changes on disk under us (guards against SIGBUS).
@@ -77,6 +82,8 @@ final class TableDocument: ObservableObject {
     var onIndexUpdate: (() -> Void)?
     /// Set by the table view; asks it to scroll a display row into view.
     var onScrollToRow: ((Int) -> Void)?
+    /// Set by the table view; asks it to scroll a data column into view.
+    var onScrollToColumn: ((Int) -> Void)?
     /// Set by the table view; asks it to repaint visible rows (search highlights).
     var onSearchChanged: (() -> Void)?
     /// Set by the table view; asks it to rebuild the header (sort indicator) + repaint.
@@ -343,6 +350,12 @@ final class TableDocument: ObservableObject {
     func requestScrollToRow(_ displayRow: Int) {
         guard displayRowCount > 0 else { return }
         onScrollToRow?(min(max(0, displayRow), displayRowCount - 1))
+    }
+
+    /// Scroll a data column (0-based) horizontally into view.
+    func requestScrollToColumn(_ dataColumn: Int) {
+        guard dataColumn >= 0, dataColumn < columnCount else { return }
+        onScrollToColumn?(dataColumn)
     }
 
     /// Show the full contents of a display row in the inspector.

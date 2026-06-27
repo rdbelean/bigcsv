@@ -108,9 +108,32 @@ struct DocumentView: View {
                 .help(purchase.isUnlocked ? "Column statistics" : "Statistics (Pro)")
                 .disabled(!document.canComputeStats)
             }
+            ToolbarItem {
+                Menu {
+                    Picker("Freeze Columns", selection: Binding(
+                        get: { document.frozenColumnCount },
+                        set: { newValue in
+                            purchase.requireUnlock(.freezeColumns) { document.frozenColumnCount = newValue }
+                        })) {
+                        Text("Don’t freeze").tag(0)
+                        ForEach(1...min(3, max(1, document.columnCount)), id: \.self) { n in
+                            Text(n == 1 ? "Freeze first column" : "Freeze first \(n) columns").tag(n)
+                        }
+                    }
+                    Divider()
+                    Button("Go to Column…") { appModel.showGoToColumn = true }
+                } label: {
+                    Label("Columns", systemImage: document.frozenColumnCount > 0 ? "pin.fill" : "pin")
+                }
+                .help("Freeze columns (Pro) and jump to a column")
+                .disabled(document.columnCount == 0)
+            }
         }
         .sheet(isPresented: $appModel.showGoToRow) {
             GoToRowSheet(document: document)
+        }
+        .sheet(isPresented: $appModel.showGoToColumn) {
+            GoToColumnSheet(document: document)
         }
         .sheet(isPresented: Binding(get: { document.inspectedRow != nil },
                                     set: { if !$0 { document.inspectedRow = nil } })) {
@@ -359,6 +382,37 @@ struct GoToRowSheet: View {
             document.requestScrollToRow(n - 1)
         }
         dismiss()
+    }
+}
+
+/// "Go to Column…" sheet: pick a column and scroll it into view.
+struct GoToColumnSheet: View {
+    @ObservedObject var document: TableDocument
+    @Environment(\.dismiss) private var dismiss
+    @State private var column = 0
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Go to Column").font(.headline)
+            Picker("Column", selection: $column) {
+                ForEach(Array(document.columnTitles.enumerated()), id: \.offset) { i, title in
+                    Text(title.isEmpty ? "Column \(i + 1)" : title).tag(i)
+                }
+            }
+            .labelsHidden()
+            .frame(maxWidth: .infinity)
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("Go") {
+                    document.requestScrollToColumn(column)
+                    dismiss()
+                }.keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 340)
+        .onAppear { column = min(max(0, document.statsColumn), max(0, document.columnCount - 1)) }
     }
 }
 

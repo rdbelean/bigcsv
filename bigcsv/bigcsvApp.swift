@@ -69,6 +69,9 @@ struct bigcsvApp: App {
                 Button("Go to Row…") { appModel.showGoToRow = true }
                     .keyboardShortcut("l", modifiers: .command)
                     .disabled(appModel.document == nil)
+                Button("Go to Column…") { appModel.showGoToColumn = true }
+                    .keyboardShortcut("l", modifiers: [.command, .shift])
+                    .disabled((appModel.document?.columnCount ?? 0) == 0)
                 Button("Column Statistics…") {
                     if let doc = appModel.document {
                         purchase.requireUnlock(.statistics) { doc.statsSheetVisible = true }

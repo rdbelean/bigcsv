@@ -210,6 +210,16 @@ struct CSVTableView: NSViewRepresentable {
         private weak var gutterColumn: NSTableColumn?
         private var vScroller: NSScroller?
 
+        // Frozen pane (Pro): a left overlay table that shows the gutter + the first
+        // `frozenColumnCount` columns, vertically synced to the main table but never
+        // scrolled horizontally. Hidden (zero width) when nothing is frozen, so the
+        // default experience is byte-for-byte the original single-table behaviour.
+        private weak var frozenTable: NSTableView?
+        private weak var frozenScroll: SynthScrollView?
+        private weak var frozenHeader: ColumnHeaderView?
+        private var frozenWidthConstraint: NSLayoutConstraint?
+        private var builtFrozenCount = -1
+
         /// Whole-file vertical scroll offset, in points.
         private var virtualY: CGFloat = 0
         /// Logical row mapped to physical row 0 of the buffer.
@@ -247,7 +257,7 @@ struct CSVTableView: NSViewRepresentable {
             table.style = .plain
             table.headerView = nil                      // we draw our own fixed header
             table.target = self
-            table.doubleAction = #selector(handleDoubleClick)
+            table.doubleAction = #selector(handleDoubleClick(_:))
             self.tableView = table
 
             let scroll = SynthScrollView()
@@ -276,10 +286,51 @@ struct CSVTableView: NSViewRepresentable {
             scroller.doubleValue = 0
             self.vScroller = scroller
 
+            // Frozen pane (added last → drawn on top of the main scroll/header).
+            let frozenT = CopyableTableView()
+            frozenT.coordinator = self
+            frozenT.dataSource = self
+            frozenT.delegate = self
+            frozenT.rowHeight = rowHeight
+            frozenT.usesAutomaticRowHeights = false
+            frozenT.usesAlternatingRowBackgroundColors = true
+            frozenT.allowsColumnResizing = false
+            frozenT.allowsColumnReordering = false
+            frozenT.allowsMultipleSelection = true
+            frozenT.columnAutoresizingStyle = .noColumnAutoresizing
+            frozenT.gridStyleMask = [.solidVerticalGridLineMask]
+            frozenT.style = .plain
+            frozenT.headerView = nil
+            frozenT.target = self
+            frozenT.doubleAction = #selector(handleDoubleClick(_:))
+            self.frozenTable = frozenT
+
+            let frozenS = SynthScrollView()
+            frozenS.coordinator = self
+            frozenS.documentView = frozenT
+            frozenS.hasVerticalScroller = false
+            frozenS.hasHorizontalScroller = false
+            frozenS.borderType = .noBorder
+            frozenS.automaticallyAdjustsContentInsets = false
+            frozenS.contentInsets = NSEdgeInsetsZero
+            frozenS.drawsBackground = false
+            frozenS.translatesAutoresizingMaskIntoConstraints = false
+            self.frozenScroll = frozenS
+
+            let frozenH = ColumnHeaderView()
+            frozenH.translatesAutoresizingMaskIntoConstraints = false
+            frozenH.onColumnClick = { [weak self] col in self?.document.toggleSort(column: col) }
+            self.frozenHeader = frozenH
+
             let container = NSView()
             container.addSubview(header)
             container.addSubview(scroll)
             container.addSubview(scroller)
+            container.addSubview(frozenS)
+            container.addSubview(frozenH)
+
+            let frozenWidth = frozenH.widthAnchor.constraint(equalToConstant: 0)
+            self.frozenWidthConstraint = frozenWidth
 
             NSLayoutConstraint.activate([
                 header.topAnchor.constraint(equalTo: container.topAnchor),
@@ -296,7 +347,19 @@ struct CSVTableView: NSViewRepresentable {
                 scroller.trailingAnchor.constraint(equalTo: container.trailingAnchor),
                 scroller.bottomAnchor.constraint(equalTo: container.bottomAnchor),
                 scroller.widthAnchor.constraint(equalToConstant: scrollerWidth),
+
+                frozenH.topAnchor.constraint(equalTo: container.topAnchor),
+                frozenH.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+                frozenH.heightAnchor.constraint(equalToConstant: headerHeight),
+                frozenWidth,
+
+                frozenS.topAnchor.constraint(equalTo: frozenH.bottomAnchor),
+                frozenS.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+                frozenS.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+                frozenS.widthAnchor.constraint(equalTo: frozenH.widthAnchor),
             ])
+            frozenS.isHidden = true
+            frozenH.isHidden = true
 
             NotificationCenter.default.addObserver(
                 self, selector: #selector(viewGeometryChanged),
@@ -307,16 +370,19 @@ struct CSVTableView: NSViewRepresentable {
                 self?.scheduleReload(force: self?.document.progress.isComplete ?? false)
             }
             document.onScrollToRow = { [weak self] row in self?.revealLogical(row) }
+            document.onScrollToColumn = { [weak self] col in self?.revealColumn(col) }
             document.onSearchChanged = { [weak self] in self?.tableView?.reloadData() }
             document.onProjectionChanged = { [weak self] in
                 guard let self else { return }
                 self.rebuildHeader()
+                self.rebuildFrozenPane()
                 // The visible row set changed (sort order / filtered count). Keep the
                 // scroll position (clamped to the new count) so streaming filter
                 // results don't yank the view to the top on every update; repaint
                 // and re-sync the scroller.
                 self.virtualY = min(self.virtualY, self.maxVirtualY())
                 self.tableView?.reloadData()
+                self.frozenTable?.reloadData()
                 self.applyVirtual()
             }
             header.onColumnClick = { [weak self] col in self?.document.toggleSort(column: col) }
@@ -326,6 +392,7 @@ struct CSVTableView: NSViewRepresentable {
                 let col = table.tableColumns[columnIndex]
                 col.width = max(col.minWidth, newWidth)
                 self.rebuildHeader()
+                self.rebuildFrozenPane()
                 self.applyVirtual()       // re-sync header offset + horizontal range
             }
             header.onReorder = { [weak self] from, to in
@@ -333,7 +400,9 @@ struct CSVTableView: NSViewRepresentable {
                       from >= 1, to >= 1,
                       from < table.tableColumns.count, to < table.tableColumns.count else { return }
                 table.moveColumn(from, toColumn: to)   // identifiers preserve the data mapping
+                self.builtFrozenCount = -1             // positions changed → rebuild the frozen prefix
                 self.rebuildHeader()
+                self.rebuildFrozenPane()
                 self.applyVirtual()
             }
 
@@ -422,17 +491,85 @@ struct CSVTableView: NSViewRepresentable {
             if newOrigin != windowOrigin {
                 windowOrigin = newOrigin
                 tableView?.reloadData()
+                frozenTable?.reloadData()
                 reprojectSelection()
             }
 
-            let x = clipX ?? clip.bounds.origin.x
+            // Horizontal: never let the clip go left of the frozen pane (so the
+            // frozen columns' originals stay hidden behind it).
+            let maxX = max(0, (tableView?.frame.width ?? 0) - clip.bounds.width)
+            let x = min(max(frozenWidth(), clipX ?? clip.bounds.origin.x), maxX)
             let y = CGFloat(topLogical - windowOrigin) * rowHeight + subRow
             CATransaction.begin(); CATransaction.setDisableActions(true)
             clip.setBoundsOrigin(NSPoint(x: x, y: y))
             scrollView?.reflectScrolledClipView(clip)
+            if let fclip = frozenScroll?.contentView {        // frozen pane: same y, x pinned at 0
+                fclip.setBoundsOrigin(NSPoint(x: 0, y: y))
+                frozenScroll?.reflectScrolledClipView(fclip)
+            }
             CATransaction.commit()
             headerView?.setHorizontalOffset(x)
             driveScroller(total: total)
+        }
+
+        // MARK: Frozen pane
+
+        /// Pixel width of the frozen pane (gutter + first N columns), 0 when nothing
+        /// is frozen.
+        private func frozenWidth() -> CGFloat {
+            guard document.frozenColumnCount > 0, let table = tableView else { return 0 }
+            let spacing = table.intercellSpacing.width
+            let n = min(document.frozenColumnCount + 1, table.tableColumns.count)   // +1 gutter
+            var w: CGFloat = 0
+            for i in 0..<n { w += table.tableColumns[i].width + spacing }
+            return w
+        }
+
+        /// Mirror the main table's leading columns into the frozen pane. Cheap when
+        /// the structural column count hasn't changed (just refresh width/header/data).
+        private func rebuildFrozenPane() {
+            guard let main = tableView, let ftable = frozenTable else { return }
+            let count = max(0, min(document.frozenColumnCount, document.columnCount))
+
+            if count != builtFrozenCount {
+                for c in ftable.tableColumns { ftable.removeTableColumn(c) }
+                if count > 0 {
+                    for src in main.tableColumns.prefix(count + 1) {   // gutter + count data
+                        let col = NSTableColumn(identifier: src.identifier)
+                        col.title = src.title
+                        col.width = src.width
+                        col.minWidth = src.minWidth
+                        ftable.addTableColumn(col)
+                    }
+                }
+                builtFrozenCount = count
+            } else if count > 0 {
+                // keep widths in sync (after a resize) without rebuilding
+                for (i, src) in main.tableColumns.prefix(count + 1).enumerated()
+                    where i < ftable.tableColumns.count {
+                    ftable.tableColumns[i].width = src.width
+                }
+            }
+
+            frozenScroll?.isHidden = count == 0
+            frozenHeader?.isHidden = count == 0
+            frozenWidthConstraint?.constant = count > 0 ? frozenWidth() : 0
+            if count > 0 {
+                rebuildFrozenHeader()
+                ftable.reloadData()
+            }
+        }
+
+        private func rebuildFrozenHeader() {
+            guard let ftable = frozenTable else { return }
+            let cols = ftable.tableColumns.map { col -> (title: String, width: CGFloat, alignment: NSTextAlignment, dataIndex: Int) in
+                if col.identifier == Self.rowNumberColumnID { return ("#", col.width, .right, -1) }
+                return (col.title, col.width, .left, Int(col.identifier.rawValue) ?? -1)
+            }
+            frozenHeader?.rebuild(columns: cols, height: headerHeight,
+                                  spacing: ftable.intercellSpacing.width,
+                                  sortColumn: document.sortColumn, ascending: document.sortAscending)
+            frozenHeader?.setHorizontalOffset(0)        // the frozen header never scrolls
         }
 
         // MARK: Whole-file scroller
@@ -480,9 +617,24 @@ struct CSVTableView: NSViewRepresentable {
             reprojectSelection()
         }
 
-        @objc private func handleDoubleClick() {
-            guard let row = tableView?.clickedRow, row >= 0 else { return }
-            document.requestInspector(displayRow: logical(row))
+        /// Scroll horizontally so data column `dataColumn` is at the left edge
+        /// (just after any frozen pane).
+        func revealColumn(_ dataColumn: Int) {
+            guard let table = tableView, let clip = scrollView?.contentView else { return }
+            let id = NSUserInterfaceItemIdentifier("\(dataColumn)")
+            let spacing = table.intercellSpacing.width
+            var x: CGFloat = 0
+            for col in table.tableColumns {
+                if col.identifier == id { break }
+                x += col.width + spacing
+            }
+            let maxX = max(0, table.frame.width - clip.bounds.width)
+            applyVirtual(clipX: min(max(frozenWidth(), x), maxX))
+        }
+
+        @objc private func handleDoubleClick(_ sender: Any?) {
+            guard let table = sender as? NSTableView, table.clickedRow >= 0 else { return }
+            document.requestInspector(displayRow: logical(table.clickedRow))
         }
 
         /// Copy the selected rows to the pasteboard as TSV (tab-separated, one row
@@ -503,20 +655,26 @@ struct CSVTableView: NSViewRepresentable {
         // MARK: Selection (logical)
 
         func tableViewSelectionDidChange(_ notification: Notification) {
-            guard !isReprojecting, let table = tableView else { return }
-            selectedLogical = IndexSet(table.selectedRowIndexes.map { logical($0) })
+            guard !isReprojecting, let t = notification.object as? NSTableView else { return }
+            selectedLogical = IndexSet(t.selectedRowIndexes.map { logical($0) })
+            reprojectSelection()        // mirror between the main table and the frozen pane
         }
 
         private func reprojectSelection() {
             guard let table = tableView else { return }
             isReprojecting = true
-            let n = table.numberOfRows
-            var physical = IndexSet()
-            for l in selectedLogical {
-                let p = l - windowOrigin
-                if p >= 0 && p < n { physical.insert(p) }
+            func physical(forRowCount n: Int) -> IndexSet {
+                var s = IndexSet()
+                for l in selectedLogical {
+                    let p = l - windowOrigin
+                    if p >= 0 && p < n { s.insert(p) }
+                }
+                return s
             }
-            table.selectRowIndexes(physical, byExtendingSelection: false)
+            table.selectRowIndexes(physical(forRowCount: table.numberOfRows), byExtendingSelection: false)
+            if let f = frozenTable, frozenScroll?.isHidden == false {
+                f.selectRowIndexes(physical(forRowCount: f.numberOfRows), byExtendingSelection: false)
+            }
             isReprojecting = false
         }
 
@@ -546,7 +704,9 @@ struct CSVTableView: NSViewRepresentable {
                 table.addTableColumn(col)
             }
             table.reloadData()
+            builtFrozenCount = -1          // column set changed → rebuild the frozen prefix
             rebuildHeader()
+            rebuildFrozenPane()
         }
 
         private func rebuildHeader() {
@@ -601,6 +761,8 @@ struct CSVTableView: NSViewRepresentable {
             }
             updateGutterWidth()
             tableView?.noteNumberOfRowsChanged()
+            frozenTable?.noteNumberOfRowsChanged()
+            rebuildFrozenPane()      // keep the frozen pane's widths/data in sync
             applyVirtual()
         }
 
