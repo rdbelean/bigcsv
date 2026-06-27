@@ -39,7 +39,9 @@ final class PurchaseManager: ObservableObject {
 
     enum PurchaseState: Equatable { case idle, loading, purchasing, restoring, failed(String) }
 
-    @Published private(set) var isUnlocked = false
+    /// Direct/Homebrew builds ship with every Pro feature unlocked (see `BuildFlavor`),
+    /// so `isUnlocked` starts `true` and StoreKit is never consulted.
+    @Published private(set) var isUnlocked = BuildFlavor.isDirectFreeBuild
     @Published private(set) var product: Product?
     @Published private(set) var purchaseState: PurchaseState = .idle
     @Published var paywallContext: PaywallContext?
@@ -47,6 +49,8 @@ final class PurchaseManager: ObservableObject {
     private var updatesTask: Task<Void, Never>?
 
     private init() {
+        // The free direct build has nothing to purchase or restore — skip all of StoreKit.
+        guard !BuildFlavor.isDirectFreeBuild else { return }
         updatesTask = listenForTransactions()
         Task { await loadProduct(); await refreshEntitlements() }
     }
@@ -77,6 +81,7 @@ final class PurchaseManager: ObservableObject {
     }
 
     func refreshEntitlements() async {
+        guard !BuildFlavor.isDirectFreeBuild else { isUnlocked = true; return }
         var unlocked = false
         for await result in Transaction.currentEntitlements {
             if case .verified(let transaction) = result,

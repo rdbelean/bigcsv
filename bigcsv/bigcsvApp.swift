@@ -32,10 +32,14 @@ struct bigcsvApp: App {
         }
         .commands {
             CommandGroup(after: .appInfo) {
-                if purchase.isUnlocked {
-                    Text("BigCSV Pro — Unlocked")
-                } else {
-                    Button("Unlock BigCSV Pro…") { purchase.presentPaywall(.filter) }
+                // The free direct/Homebrew build has no "Pro" tier — every feature is
+                // included — so it shows no unlock/restore affordance at all.
+                if !BuildFlavor.isDirectFreeBuild {
+                    if purchase.isUnlocked {
+                        Text("BigCSV Pro — Unlocked")
+                    } else {
+                        Button("Unlock BigCSV Pro…") { purchase.presentPaywall(.filter) }
+                    }
                 }
             }
             CommandGroup(replacing: .newItem) {
