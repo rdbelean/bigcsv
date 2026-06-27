@@ -56,6 +56,7 @@ enum Brand {
     static let accent      = NSColor(hex: 0xA3E635)                 // signal green
     static let accentDeep  = NSColor(hex: 0x65A30D)                 // hover/active
     static let accentText  = dyn(0x3F6212, 0xBEF264)               // green text on surface
+    static let onAccent    = NSColor(hex: 0x1A2E05)                 // ink text on the green button
 
     static let windowBg    = dyn(0xFFFFFF, 0x16191B)
     static let barBg       = dyn(0xF6F6F4, 0x1C2022)

@@ -668,6 +668,9 @@ final class TableDocument: ObservableObject, Identifiable {
     /// Number of rows the current export would write (the visible/filtered count).
     var exportableRowCount: Int { projection.count }
 
+    /// Total data rows in the file (ignores any active filter).
+    var totalRowCount: Int { projection.totalRows }
+
     /// Export is offered only once indexing is complete and there is at least one
     /// row — this prevents writing a silently truncated file mid-index.
     var canExport: Bool { progress.isComplete && exportableRowCount > 0 }

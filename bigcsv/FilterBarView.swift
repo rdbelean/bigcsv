@@ -12,9 +12,13 @@ struct FilterBar: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
-                Image(systemName: "line.3.horizontal.decrease.circle")
-                    .foregroundStyle(.secondary)
+                Text("FILTER")
+                    .font(Brand.monoFont(10.5, .semibold))
+                    .foregroundStyle(Color(Brand.accentText))
+                    .tracking(1)
                 Text("Show rows where")
+                    .font(Brand.sansFont(12.5))
+                    .foregroundStyle(Color(Brand.textSecondary))
                 Picker("", selection: Binding(
                     get: { document.filterSet.combinator },
                     set: { document.filterSet.combinator = $0 })) {
@@ -45,7 +49,8 @@ struct FilterBar: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
-        .background(.bar)
+        .background(Color(Brand.filterStripBg))
+        .overlay(alignment: .bottom) { Color(Brand.accent).opacity(0.4).frame(height: 1) }
         .onAppear { if document.filterSet.conditions.isEmpty { addCondition() } }
         .onChange(of: document.filterSet) { _, _ in scheduleApply() }
         .alert("Save Filter", isPresented: $showSaveDialog) {

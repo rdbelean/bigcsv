@@ -31,14 +31,6 @@ struct AppShellView: View {
             appModel.open(url: url)
             return true
         }
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button { appModel.presentOpenPanel() } label: {
-                    Label("Open", systemImage: "folder")
-                }
-                .help("Open a CSV or TSV file (⌘O)")
-            }
-        }
         .alert("Couldn’t open file",
                isPresented: Binding(get: { appModel.errorMessage != nil },
                                     set: { if !$0 { appModel.errorMessage = nil } })) {
@@ -121,16 +113,12 @@ struct DocumentView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            BrandToolbar(document: document)
             if document.fileChangedExternally {
                 FileChangedBanner { appModel.reopenCurrent() }
             }
-            if document.findBarVisible {
-                FindBar(document: document)
-                Divider()
-            }
             if document.filterBarVisible {
                 FilterBar(document: document)
-                Divider()
             }
             if let unsupported = document.unsupportedEncoding {
                 UnsupportedEncodingView(encoding: unsupported,
@@ -139,61 +127,7 @@ struct DocumentView: View {
                 CSVTableView(document: document)
                     .id(ObjectIdentifier(document))   // fresh table per file
             }
-            Divider()
             StatusBarView(document: document)
-        }
-        .toolbar {
-            FormatMenu(document: document)
-            ToolbarItem {
-                Button {
-                    purchase.requireUnlock(.filter) { document.filterBarVisible.toggle() }
-                } label: {
-                    Label("Filter", systemImage: document.filterSet.isEmpty
-                          ? "line.3.horizontal.decrease.circle"
-                          : "line.3.horizontal.decrease.circle.fill")
-                }
-                .help(purchase.isUnlocked ? "Filter rows" : "Filter rows (Pro)")
-            }
-            ToolbarItem {
-                Button {
-                    purchase.requireUnlock(.export) { document.exportSheetVisible = true }
-                } label: {
-                    Label("Export", systemImage: "square.and.arrow.up")
-                }
-                .help(purchase.isUnlocked
-                      ? (document.canExport ? "Export the current view" : "Export (available after indexing finishes)")
-                      : "Export (Pro)")
-                .disabled(!document.canExport)
-            }
-            ToolbarItem {
-                Button {
-                    purchase.requireUnlock(.statistics) { document.statsSheetVisible = true }
-                } label: {
-                    Label("Statistics", systemImage: "chart.bar.xaxis")
-                }
-                .help(purchase.isUnlocked ? "Column statistics" : "Statistics (Pro)")
-                .disabled(!document.canComputeStats)
-            }
-            ToolbarItem {
-                Menu {
-                    Picker("Freeze Columns", selection: Binding(
-                        get: { document.frozenColumnCount },
-                        set: { newValue in
-                            purchase.requireUnlock(.freezeColumns) { document.frozenColumnCount = newValue }
-                        })) {
-                        Text("Don’t freeze").tag(0)
-                        ForEach(1...min(3, max(1, document.columnCount)), id: \.self) { n in
-                            Text(n == 1 ? "Freeze first column" : "Freeze first \(n) columns").tag(n)
-                        }
-                    }
-                    Divider()
-                    Button("Go to Column…") { appModel.showGoToColumn = true }
-                } label: {
-                    Label("Columns", systemImage: document.frozenColumnCount > 0 ? "pin.fill" : "pin")
-                }
-                .help("Freeze columns (Pro) and jump to a column")
-                .disabled(document.columnCount == 0)
-            }
         }
         .sheet(isPresented: $appModel.showGoToRow) {
             GoToRowSheet(document: document)
@@ -246,93 +180,7 @@ struct DocumentView: View {
     }
 }
 
-/// Find bar (⌘F): live full-text search with match count and next/prev.
-struct FindBar: View {
-    @ObservedObject var document: TableDocument
-    @FocusState private var focused: Bool
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-            TextField("Search", text: $document.searchQuery)
-                .textFieldStyle(.plain)
-                .focused($focused)
-                .frame(minWidth: 200)
-                .onSubmit { document.nextMatch() }
-                .onChange(of: document.searchQuery) { _, _ in document.performSearch() }
-            Text(matchText)
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
-                .frame(minWidth: 90, alignment: .trailing)
-            Toggle(isOn: $document.searchCaseSensitive) { Text("Aa") }
-                .toggleStyle(.button)
-                .help("Match case")
-                .onChange(of: document.searchCaseSensitive) { _, _ in document.performSearch() }
-            Button { document.previousMatch() } label: { Image(systemName: "chevron.up") }
-                .disabled(document.matchRows.isEmpty)
-                .help("Previous match (⇧⌘G)")
-            Button { document.nextMatch() } label: { Image(systemName: "chevron.down") }
-                .disabled(document.matchRows.isEmpty)
-                .help("Next match (⌘G)")
-            Button { close() } label: { Image(systemName: "xmark") }
-                .help("Close (Esc)")
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(.bar)
-        .onAppear { focused = true }
-        .onKeyPress(.escape) { close(); return .handled }
-    }
-
-    private func close() {
-        document.findBarVisible = false
-        document.clearSearch()
-    }
-
-    private var matchText: String {
-        if document.searchQuery.isEmpty { return "" }
-        if document.matchRows.isEmpty { return document.isSearching ? "searching…" : "no results" }
-        let pos = document.currentMatchIndex + 1
-        let total = document.matchRows.count
-        return document.isSearching ? "\(pos) of \(total)+" : "\(pos) of \(total)"
-    }
-}
-
-/// Toolbar menu to override the auto-detected delimiter / encoding and toggle the
-/// header row.
-struct FormatMenu: ToolbarContent {
-    @ObservedObject var document: TableDocument
-
-    var body: some ToolbarContent {
-        ToolbarItem(placement: .automatic) {
-            Menu {
-                Picker("Delimiter", selection: Binding(
-                    get: { document.dialect.delimiter },
-                    set: { document.setDelimiter($0) })) {
-                    ForEach(Delimiter.allCases, id: \.self) { d in
-                        Text("\(d.displayName)  (\(d.displaySymbol))").tag(d)
-                    }
-                }
-                Picker("Encoding", selection: Binding(
-                    get: { document.dialect.encoding },
-                    set: { document.setEncoding($0) })) {
-                    ForEach(TextEncoding.allCases, id: \.self) { e in
-                        Text(e.displayName).tag(e)
-                    }
-                }
-                Divider()
-                Toggle("First Row Is Header", isOn: Binding(
-                    get: { document.dialect.hasHeader },
-                    set: { document.setHasHeader($0) }))
-            } label: {
-                Label("Format", systemImage: "tablecells.badge.ellipsis")
-            }
-            .help("Delimiter, encoding, and header options")
-        }
-    }
-}
-
-/// Shown before any file is open: a friendly drop target for non-technical users.
+/// Shown before any file is open: a calm, branded drop target.
 struct EmptyStateView: View {
     let onOpen: () -> Void
     var recentFiles: [RecentFile] = []
@@ -341,38 +189,46 @@ struct EmptyStateView: View {
     var body: some View {
         VStack(spacing: 18) {
             Image(systemName: "tablecells")
-                .font(.system(size: 64, weight: .thin))
-                .foregroundStyle(.tertiary)
-            VStack(spacing: 6) {
-                Text("Open a big CSV — instantly")
-                    .font(.title2.weight(.semibold))
+                .font(.system(size: 60, weight: .ultraLight))
+                .foregroundStyle(Color(Brand.textMuted))
+            VStack(spacing: 7) {
+                Text("Open giant CSVs, instantly")
+                    .font(Brand.sansFont(24, .semibold))
+                    .foregroundStyle(Color(Brand.textPrimary))
                 Text("Drag a .csv or .tsv file here, or choose one to open.")
-                    .foregroundStyle(.secondary)
+                    .font(Brand.sansFont(13.5))
+                    .foregroundStyle(Color(Brand.textSecondary))
             }
             Button(action: onOpen) {
-                Text("Open File…").padding(.horizontal, 8)
+                Text("Open File…")
+                    .font(Brand.sansFont(13.5, .semibold))
+                    .foregroundStyle(Color(Brand.onAccent))
+                    .padding(.horizontal, 18).frame(height: 38)
+                    .background(Color(Brand.accent), in: RoundedRectangle(cornerRadius: 10))
             }
-            .controlSize(.large)
+            .buttonStyle(.plain)
             .keyboardShortcut("o", modifiers: .command)
 
             if !recentFiles.isEmpty {
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 6) {
                     Text("RECENT")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.tertiary)
+                        .font(Brand.monoFont(10.5, .semibold))
+                        .foregroundStyle(Color(Brand.textMuted))
+                        .tracking(1)
                     ForEach(recentFiles.prefix(5)) { file in
                         Button { onOpenRecent(file) } label: {
                             Label(file.name, systemImage: "doc.text")
-                                .font(.callout)
+                                .font(Brand.sansFont(13))
+                                .foregroundStyle(Color(Brand.accentText))
                         }
-                        .buttonStyle(.link)
+                        .buttonStyle(.plain)
                     }
                 }
-                .padding(.top, 8)
+                .padding(.top, 10)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(nsColor: .controlBackgroundColor))
+        .background(Color(Brand.windowBg))
     }
 }
 
@@ -523,51 +379,59 @@ struct StatusBarView: View {
     @ObservedObject var document: TableDocument
 
     var body: some View {
-        HStack(spacing: 14) {
-            Text("\(document.displayRowCount.formatted()) rows")
-            if document.columnCount > 0 {
-                Text("\(document.columnCount) columns")
-            }
-            Text(fileSizeText).foregroundStyle(.secondary)
-
-            Spacer()
-
-            Text(document.dialect.delimiter.displayName)
-                .foregroundStyle(.secondary).help("Delimiter")
-            Text(document.dialect.encoding.displayName)
-                .foregroundStyle(.secondary).help("Text encoding")
-
-            if document.isExporting {
-                HStack(spacing: 8) {
-                    ProgressView(value: document.exportProgress).frame(width: 120)
-                    Text("Exporting… \(Int(document.exportProgress * 100))%")
-                        .foregroundStyle(.secondary).monospacedDigit()
-                }
-            } else if document.isSorting {
-                HStack(spacing: 8) {
-                    ProgressView(value: document.sortProgress).frame(width: 120)
-                    Text("Sorting… \(Int(document.sortProgress * 100))%")
-                        .foregroundStyle(.secondary).monospacedDigit()
-                }
-            } else if document.unsupportedEncoding != nil {
-                Label("Unsupported encoding", systemImage: "exclamationmark.triangle")
-                    .foregroundStyle(.orange)
-            } else if !document.progress.isComplete {
-                HStack(spacing: 8) {
-                    ProgressView(value: document.progress.fractionComplete)
-                        .frame(width: 120)
-                    Text("Indexing… \(Int(document.progress.fractionComplete * 100))%")
-                        .foregroundStyle(.secondary).monospacedDigit()
-                }
-            } else {
-                Label("Ready", systemImage: "checkmark.circle")
-                    .foregroundStyle(.secondary)
-            }
+        HStack(spacing: 0) {
+            leading
+            Spacer(minLength: 12)
+            trailing
         }
-        .font(.callout)
+        .font(Brand.monoFont(11))
+        .frame(height: 28)
         .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .background(.bar)
+        .background(Color(Brand.barBg))
+        .overlay(alignment: .top) { Color(Brand.hairline).frame(height: 1) }
+    }
+
+    @ViewBuilder private var leading: some View {
+        if document.isExporting {
+            progress("Exporting", document.exportProgress)
+        } else if document.isSorting {
+            progress("Sorting", document.sortProgress)
+        } else if document.unsupportedEncoding != nil {
+            Label("Unsupported encoding", systemImage: "exclamationmark.triangle")
+                .foregroundStyle(.orange)
+        } else if !document.progress.isComplete {
+            progress("Indexing", document.progress.fractionComplete)
+        } else {
+            Text("\(document.fileURL.lastPathComponent)  ·  \(fileSizeText)")
+                .foregroundStyle(Color(Brand.textSecondary))
+                .lineLimit(1)
+        }
+    }
+
+    private var trailing: some View {
+        (Text("\(document.dialect.encoding.displayName)  ·  \(document.dialect.delimiter.displayName)  ·  ")
+            .foregroundStyle(Color(Brand.textSecondary))
+         + Text(countsText).foregroundStyle(Color(Brand.textMuted)))
+            .lineLimit(1)
+    }
+
+    private func progress(_ label: String, _ value: Double) -> some View {
+        HStack(spacing: 8) {
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color(Brand.hairline)).frame(width: 90, height: 4)
+                Capsule().fill(Color(Brand.accent)).frame(width: 90 * max(0, min(1, value)), height: 4)
+            }
+            Text("\(label)… \(Int(value * 100))%").foregroundStyle(Color(Brand.textSecondary))
+        }
+    }
+
+    private var countsText: String {
+        let cols = document.columnCount
+        let colPart = cols > 0 ? "  ·  \(cols) cols" : ""
+        if !document.filterSet.isEmpty && document.displayRowCount != document.totalRowCount {
+            return "\(document.displayRowCount.formatted()) of \(document.totalRowCount.formatted()) rows" + colPart
+        }
+        return "\(document.displayRowCount.formatted()) rows" + colPart
     }
 
     private var fileSizeText: String {
