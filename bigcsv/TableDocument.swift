@@ -20,6 +20,8 @@ final class TableDocument: ObservableObject, Identifiable {
     @Published private(set) var dialect: CSVDialect
     @Published private(set) var progress: IndexProgress = .empty
     @Published private(set) var columnTitles: [String] = []
+    /// Per-column numeric flag (sampled), parallel to `columnTitles`.
+    @Published private(set) var columnIsNumeric: [Bool] = []
     @Published private(set) var displayRowCount: Int = 0
     /// Bumped whenever the column model changes (count or titles) so the table
     /// knows to rebuild its NSTableColumns even if the count is unchanged.
@@ -171,16 +173,26 @@ final class TableDocument: ObservableObject, Identifiable {
     private func computeColumns() {
         let sample = min(index.count, 100)
         guard sample > 0 else { return }
-        var maxCols = 0
-        var firstRow: [String] = []
-        for r in 0..<sample {
-            let fields = parsedRecord(r)
-            if r == 0 { firstRow = fields }
-            maxCols = max(maxCols, fields.count)
-        }
+        var rows: [[String]] = []
+        rows.reserveCapacity(sample)
+        for r in 0..<sample { rows.append(parsedRecord(r)) }
+        let maxCols = rows.map(\.count).max() ?? 0
         guard maxCols > 0 else { return }
+        let firstRow = rows.first ?? []
+
+        // Per-column numeric detection (from the data rows) → right-aligned mono cells.
+        let dataRows = dialect.hasHeader ? Array(rows.dropFirst()) : rows
+        columnIsNumeric = (0..<maxCols).map { c in
+            NumberParsing.isNumericColumn(dataRows.compactMap { c < $0.count ? $0[c] : nil })
+        }
+
         columnsComputed = true
         setColumnTitles(makeTitles(maxColumns: maxCols, firstRow: firstRow))
+    }
+
+    /// True if `column` looked numeric in the sample (drives right-aligned mono cells).
+    func isNumericColumn(_ column: Int) -> Bool {
+        column >= 0 && column < columnIsNumeric.count && columnIsNumeric[column]
     }
 
     private func makeTitles(maxColumns: Int, firstRow: [String]) -> [String] {

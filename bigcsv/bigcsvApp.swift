@@ -9,6 +9,10 @@ import AppKit
 /// AppKit delegate that catches Finder "Open With" / double-click / drag-onto-Dock
 /// opens. These arrive already security-scope-granted by LaunchServices.
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        Brand.registerFonts            // bundle the Geist / Geist Mono fonts before any UI draws
+    }
+
     func application(_ application: NSApplication, open urls: [URL]) {
         // Single-window app: the last URL wins (open replaces the current file).
         if let url = urls.last {

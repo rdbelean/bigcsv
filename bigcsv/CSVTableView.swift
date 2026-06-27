@@ -59,6 +59,85 @@ struct CSVTableView: NSViewRepresentable {
         }
     }
 
+    /// Row background: brand zebra, a tinted row-number gutter strip with a right
+    /// hairline, a faint bottom separator, and our own green selection (tint + a 3px
+    /// left accent bar) — never the default blue system highlight.
+    final class BrandRowView: NSTableRowView {
+        var zebra = false
+        var gutterWidth: CGFloat = 0
+        override var isOpaque: Bool { true }
+        override func drawSelection(in dirtyRect: NSRect) { }   // handled in drawBackground
+
+        override func drawBackground(in dirtyRect: NSRect) {
+            (zebra ? Brand.zebraOdd : Brand.windowBg).setFill()
+            bounds.fill()
+            if gutterWidth > 0, !isSelected {
+                Brand.gutterBg.setFill()
+                NSRect(x: 0, y: 0, width: gutterWidth, height: bounds.height).fill()
+            }
+            if isSelected {
+                Brand.selectionBg.setFill()
+                bounds.fill()
+            }
+            if gutterWidth > 0 { strokeV(gutterWidth - 0.5, Brand.hairline) }
+            strokeH(bounds.height - 0.5, Brand.rowSeparator)
+            if isSelected {
+                Brand.accent.setFill()
+                NSRect(x: 0, y: 0, width: 3, height: bounds.height).fill()
+            }
+        }
+
+        private func strokeV(_ x: CGFloat, _ c: NSColor) {
+            c.setStroke(); let p = NSBezierPath(); p.lineWidth = 1
+            p.move(to: NSPoint(x: x, y: 0)); p.line(to: NSPoint(x: x, y: bounds.height)); p.stroke()
+        }
+        private func strokeH(_ y: CGFloat, _ c: NSColor) {
+            c.setStroke(); let p = NSBezierPath(); p.lineWidth = 1
+            p.move(to: NSPoint(x: 0, y: y)); p.line(to: NSPoint(x: bounds.width, y: y)); p.stroke()
+        }
+    }
+
+    /// A data/gutter cell: a single-line label inset 12pt and vertically centered.
+    final class BrandCell: NSView {
+        let label = NSTextField(labelWithString: "")
+        override init(frame: NSRect) {
+            super.init(frame: frame)
+            label.lineBreakMode = .byTruncatingTail
+            label.cell?.usesSingleLineMode = true
+            label.drawsBackground = false
+            label.isBordered = false
+            addSubview(label)
+        }
+        required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+        override func layout() {
+            super.layout()
+            let pad: CGFloat = 12, h: CGFloat = 18
+            label.frame = NSRect(x: pad, y: (bounds.height - h) / 2,
+                                 width: max(0, bounds.width - pad * 2), height: h)
+        }
+    }
+
+    /// A non-interactive bottom gradient (window-bg → clear) hinting at more rows.
+    final class GradientFadeView: NSView {
+        private let grad = CAGradientLayer()
+        override init(frame: NSRect) { super.init(frame: frame); wantsLayer = true; layer = grad; refresh() }
+        required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+        override var isFlipped: Bool { true }
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+        override func layout() { super.layout(); grad.frame = bounds }
+        override func viewDidChangeEffectiveAppearance() {
+            super.viewDidChangeEffectiveAppearance(); refresh()
+        }
+        private func refresh() {
+            let prev = NSAppearance.current
+            NSAppearance.current = effectiveAppearance
+            grad.colors = [Brand.windowBg.withAlphaComponent(0).cgColor, Brand.windowBg.cgColor]
+            grad.startPoint = CGPoint(x: 0.5, y: 0)
+            grad.endPoint = CGPoint(x: 0.5, y: 1)
+            NSAppearance.current = prev
+        }
+    }
+
     // MARK: - Fixed, horizontally-syncable column header
 
     final class ColumnHeaderView: NSView {
@@ -152,13 +231,13 @@ struct CSVTableView: NSViewRepresentable {
         }
 
         override func draw(_ dirtyRect: NSRect) {
-            NSColor.windowBackgroundColor.setFill()
+            Brand.headerBg.setFill()
             dirtyRect.fill()
-            NSColor.separatorColor.setStroke()
+            Brand.hairline.setStroke()
             let y = bounds.height - 0.5
             NSBezierPath.strokeLine(from: NSPoint(x: 0, y: y), to: NSPoint(x: bounds.width, y: y))
             if let dx = dropIndicatorX {
-                NSColor.controlAccentColor.setStroke()
+                Brand.accent.setStroke()
                 let line = NSBezierPath()
                 line.lineWidth = 2
                 line.move(to: NSPoint(x: dx, y: 0))
@@ -173,11 +252,12 @@ struct CSVTableView: NSViewRepresentable {
             columnRanges.removeAll(keepingCapacity: true)
             var x: CGFloat = 0
             for col in columns {
+                let sorted = col.dataIndex >= 0 && col.dataIndex == sortColumn
                 var title = col.title
-                if col.dataIndex >= 0, col.dataIndex == sortColumn { title += ascending ? "  ▲" : "  ▼" }
+                if sorted { title += ascending ? "  ▲" : "  ▼" }
                 let label = NSTextField(labelWithString: title)
-                label.font = .systemFont(ofSize: 12, weight: .semibold)
-                label.textColor = .secondaryLabelColor
+                label.font = Brand.mono(11.5, .semibold)
+                label.textColor = sorted ? Brand.accentDeep : Brand.textSecondary
                 label.lineBreakMode = .byTruncatingTail
                 label.alignment = col.alignment
                 label.frame = NSRect(x: x + 2, y: (height - 16) / 2,
@@ -201,8 +281,9 @@ struct CSVTableView: NSViewRepresentable {
         static let rowNumberColumnID = NSUserInterfaceItemIdentifier("__row__")
 
         private let document: TableDocument
-        private let rowHeight: CGFloat = 22
-        private let headerHeight: CGFloat = 24
+        private let rowHeight: CGFloat = Brand.rowHeight
+        private let headerHeight: CGFloat = 30
+        private let brandRowID = NSUserInterfaceItemIdentifier("__brandrow__")
         private let scrollerWidth: CGFloat = 15
         /// Physical rows the table holds. 200,000 × 22pt × 2 ≈ 8.8M device px —
         /// far under the geometry limit — yet large enough that the window
@@ -254,7 +335,10 @@ struct CSVTableView: NSViewRepresentable {
             table.delegate = self
             table.rowHeight = rowHeight
             table.usesAutomaticRowHeights = false
-            table.usesAlternatingRowBackgroundColors = true
+            table.usesAlternatingRowBackgroundColors = false   // we draw brand zebra
+            table.selectionHighlightStyle = .none              // we draw brand selection
+            table.backgroundColor = Brand.windowBg
+            table.gridColor = Brand.columnSeparator
             table.allowsColumnResizing = true
             table.allowsColumnReordering = false        // Phase 3
             table.allowsMultipleSelection = true
@@ -273,6 +357,7 @@ struct CSVTableView: NSViewRepresentable {
             scroll.hasHorizontalScroller = true
             scroll.autohidesScrollers = false
             scroll.borderType = .noBorder
+            scroll.backgroundColor = Brand.windowBg
             scroll.automaticallyAdjustsContentInsets = false
             scroll.contentInsets = NSEdgeInsetsZero
             scroll.contentView.postsFrameChangedNotifications = true
@@ -299,7 +384,10 @@ struct CSVTableView: NSViewRepresentable {
             frozenT.delegate = self
             frozenT.rowHeight = rowHeight
             frozenT.usesAutomaticRowHeights = false
-            frozenT.usesAlternatingRowBackgroundColors = true
+            frozenT.usesAlternatingRowBackgroundColors = false
+            frozenT.selectionHighlightStyle = .none
+            frozenT.backgroundColor = Brand.windowBg
+            frozenT.gridColor = Brand.columnSeparator
             frozenT.allowsColumnResizing = false
             frozenT.allowsColumnReordering = false
             frozenT.allowsMultipleSelection = true
@@ -320,7 +408,7 @@ struct CSVTableView: NSViewRepresentable {
             frozenS.automaticallyAdjustsContentInsets = false
             frozenS.contentInsets = NSEdgeInsetsZero
             frozenS.drawsBackground = true                 // opaque: hides the main table's frozen copies
-            frozenS.backgroundColor = .controlBackgroundColor
+            frozenS.backgroundColor = Brand.windowBg
             frozenS.translatesAutoresizingMaskIntoConstraints = false
             self.frozenScroll = frozenS
 
@@ -367,6 +455,17 @@ struct CSVTableView: NSViewRepresentable {
             ])
             frozenS.isHidden = true
             frozenH.isHidden = true
+
+            // Bottom fade hinting at more rows below (non-interactive overlay).
+            let fade = GradientFadeView()
+            fade.translatesAutoresizingMaskIntoConstraints = false
+            container.addSubview(fade)
+            NSLayoutConstraint.activate([
+                fade.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+                fade.trailingAnchor.constraint(equalTo: scroller.leadingAnchor),
+                fade.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+                fade.heightAnchor.constraint(equalToConstant: 40),
+            ])
 
             NotificationCenter.default.addObserver(
                 self, selector: #selector(viewGeometryChanged),
@@ -683,8 +782,10 @@ struct CSVTableView: NSViewRepresentable {
                 return s
             }
             table.selectRowIndexes(physical(forRowCount: table.numberOfRows), byExtendingSelection: false)
+            table.enumerateAvailableRowViews { rv, _ in rv.needsDisplay = true }   // .none style → repaint
             if let f = frozenTable, frozenScroll?.isHidden == false {
                 f.selectRowIndexes(physical(forRowCount: f.numberOfRows), byExtendingSelection: false)
+                f.enumerateAvailableRowViews { rv, _ in rv.needsDisplay = true }
             }
             isReprojecting = false
         }
@@ -783,59 +884,85 @@ struct CSVTableView: NSViewRepresentable {
             max(0, min(document.displayRowCount - windowOrigin, bufferRows))
         }
 
+        func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
+            let view = (tableView.makeView(withIdentifier: brandRowID, owner: self) as? BrandRowView)
+                ?? { let v = BrandRowView(); v.identifier = brandRowID; return v }()
+            view.zebra = (logical(row) & 1) == 1                 // stable absolute-row striping
+            view.gutterWidth = tableView.tableColumns.first?.width ?? 0
+            return view
+        }
+
         func tableView(_ tableView: NSTableView,
                        viewFor tableColumn: NSTableColumn?,
                        row: Int) -> NSView? {
             guard let tableColumn else { return nil }
             let id = tableColumn.identifier
-
-            let cell: NSTextField
-            if let reused = tableView.makeView(withIdentifier: id, owner: self) as? NSTextField {
-                cell = reused
-            } else {
-                cell = NSTextField(labelWithString: "")
-                cell.identifier = id
-                cell.lineBreakMode = .byTruncatingTail
-                cell.isBordered = false
-                cell.drawsBackground = false
-                cell.font = .systemFont(ofSize: 12)
-            }
+            let cell = (tableView.makeView(withIdentifier: id, owner: self) as? BrandCell)
+                ?? { let c = BrandCell(); c.identifier = id; return c }()
+            let label = cell.label
 
             if id == Self.rowNumberColumnID {
-                cell.stringValue = "\(document.fileRowNumber(displayRow: logical(row)))"
-                cell.alignment = .right
-                cell.textColor = .secondaryLabelColor
-                cell.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+                label.stringValue = document.fileRowNumber(displayRow: logical(row)).formatted()
+                label.alignment = .right
+                label.textColor = Brand.textMuted
+                label.font = Brand.mono(11.5)
             } else if let columnIndex = Int(id.rawValue) {
                 let text = document.cell(displayRow: logical(row), column: columnIndex)
-                cell.alignment = .left
-                cell.textColor = .labelColor
-                cell.font = .systemFont(ofSize: 12)
-                cell.stringValue = text
-                if let highlighted = highlightedString(text) {
-                    cell.attributedStringValue = highlighted
+                let numeric = document.isNumericColumn(columnIndex)
+                label.alignment = numeric ? .right : .left
+                label.textColor = Brand.textPrimary
+                label.font = numeric ? Brand.mono(13) : Brand.sans(13)
+                if let dot = Self.statusDot(text) {
+                    label.attributedStringValue = Self.statusAttributed(text, dot: dot)
+                } else if let highlighted = highlightedString(text, mono: numeric) {
+                    label.attributedStringValue = highlighted
+                } else {
+                    label.stringValue = text
                 }
             }
             return cell
         }
 
-        /// Yellow-highlight every occurrence of the active search query in `text`,
+        /// A quiet status dot + label for cells whose value is a recognizable status
+        /// word (rendered as "● Paid" etc.). Nil for ordinary cells.
+        static func statusDot(_ raw: String) -> NSColor? {
+            switch raw.trimmingCharacters(in: .whitespaces).lowercased() {
+            case "paid", "active", "success", "succeeded", "completed", "done", "shipped",
+                 "delivered", "approved", "enabled":                      return Brand.dotPaid
+            case "pending", "processing", "in progress", "waiting", "queued", "review":
+                                                                          return Brand.dotPending
+            case "refunded", "cancelled", "canceled", "inactive", "closed", "paused",
+                 "archived", "disabled":                                  return Brand.dotRefunded
+            case "failed", "error", "declined", "rejected", "overdue":    return Brand.dotFailed
+            default:                                                      return nil
+            }
+        }
+
+        static func statusAttributed(_ raw: String, dot: NSColor) -> NSAttributedString {
+            let s = NSMutableAttributedString(string: "● ", attributes: [
+                .foregroundColor: dot, .font: Brand.sans(8), .baselineOffset: 1.5,
+            ])
+            s.append(NSAttributedString(string: raw.trimmingCharacters(in: .whitespaces).capitalized,
+                                        attributes: [.foregroundColor: Brand.textSecondary, .font: Brand.sans(13)]))
+            return s
+        }
+
+        /// Green-highlight every occurrence of the active search query in `text`,
         /// or nil when there's no active query / no match (cell stays plain).
-        private func highlightedString(_ text: String) -> NSAttributedString? {
+        private func highlightedString(_ text: String, mono: Bool) -> NSAttributedString? {
             let query = document.searchQuery
             guard !query.isEmpty, !text.isEmpty else { return nil }
             let options: String.CompareOptions = document.searchCaseSensitive ? [] : [.caseInsensitive]
             guard text.range(of: query, options: options) != nil else { return nil }
 
             let attr = NSMutableAttributedString(string: text, attributes: [
-                .foregroundColor: NSColor.labelColor,
-                .font: NSFont.systemFont(ofSize: 12),
+                .foregroundColor: Brand.textPrimary,
+                .font: mono ? Brand.mono(13) : Brand.sans(13),
             ])
             var from = text.startIndex
             while let r = text.range(of: query, options: options, range: from..<text.endIndex) {
-                attr.addAttribute(.backgroundColor,
-                                  value: NSColor.systemYellow.withAlphaComponent(0.45),
-                                  range: NSRange(r, in: text))
+                attr.addAttributes([.backgroundColor: Brand.searchMatchBg, .foregroundColor: Brand.accentText],
+                                   range: NSRange(r, in: text))
                 if r.upperBound == text.endIndex { break }
                 from = r.upperBound
             }
