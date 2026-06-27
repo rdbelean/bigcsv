@@ -58,6 +58,9 @@ public nonisolated struct ExportRowSource: Sendable {
                 if Task.isCancelled { throw CancellationError() }
                 try body(p, parse(at: off))
                 p += 1
+                // Real suspension point: without it this non-suspending async loop runs
+                // synchronously on the caller's actor (the MainActor) and freezes the UI.
+                if p & 0x3FFF == 0 { await Task.yield() }
             }
         } else {
             var pos = RecordScanner.utf8BOMLength(bytes)
@@ -74,6 +77,7 @@ public nonisolated struct ExportRowSource: Sendable {
                     UnsafeRawBufferPointer(rebasing: bytes[pos..<min(next, n)]), dialect: dialect))
                 pos = next
                 p += 1
+                if p & 0x3FFF == 0 { await Task.yield() }   // hop off the MainActor (see above)
             }
         }
     }

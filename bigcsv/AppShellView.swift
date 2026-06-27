@@ -603,6 +603,7 @@ struct StatisticsSheet: View {
             document.computeStats(column: min(max(0, document.statsColumn),
                                               max(0, document.columnCount - 1)))
         }
+        .onDisappear { document.cancelStats() }
     }
 }
 
