@@ -110,8 +110,8 @@ public nonisolated struct ExportEngine: Sendable {
             if written & 0x3FF == 0 {
                 if Task.isCancelled { throw CancellationError() }
                 onProgress(Double(written) / Double(max(1, total)), false)
-                try flush(force: false)
             }
+            try flush(force: false)   // cheap no-op until the buffer reaches the threshold
         }
 
         // ── Body ─────────────────────────────────────────────────────────────
@@ -156,10 +156,21 @@ public nonisolated struct ExportEngine: Sendable {
         switch (request.subsetOffsets, request.order) {
         case (nil, nil):
             return nil                                            // sequential
-        case let (subset?, order?):
-            return order.map { subset[Int($0)] }                  // filter + sort
-        case let (subset?, nil):
-            return subset                                         // filter only
+
+        case let (subset?, order?):                               // filter + sort
+            // One emitted row per displayed (filtered) position, mirroring
+            // RowProjection exactly: position p → subset index `order[p]` (identity
+            // for any tail beyond a short/raced permutation) → byte offset. An
+            // out-of-range index yields -1, which the body turns into an empty row
+            // rather than trapping.
+            return (0..<subset.count).map { p in
+                let i = p < order.count ? Int(order[p]) : p
+                return i >= 0 && i < subset.count ? subset[i] : -1
+            }
+
+        case let (subset?, nil):                                  // filter only
+            return subset
+
         case let (nil, order?):                                   // sort only — collect all offsets first
             var all = [Int](); all.reserveCapacity(request.rowCount)
             var pos = RecordScanner.utf8BOMLength(bytes)
@@ -175,7 +186,13 @@ public nonisolated struct ExportEngine: Sendable {
                 pos = RecordScanner.nextRecordStart(bytes, from: pos, delimiter: srcDelimiter, quote: quote)
                 d += 1
             }
-            return order.map { Int($0) < all.count ? all[Int($0)] : -1 }
+            // One emitted row per displayed position. Identity fallback for any tail
+            // beyond a sort permutation that was taken before the index finished
+            // growing — so the export matches exactly what the table shows.
+            return (0..<all.count).map { p in
+                let i = p < order.count ? Int(order[p]) : p
+                return i >= 0 && i < all.count ? all[i] : -1
+            }
         }
     }
 
@@ -210,14 +227,23 @@ public nonisolated struct ExportEngine: Sendable {
     }
 
     /// Append one JSON object `{"col":"val",...}`. Values are always strings (CSV is
-    /// untyped); keys are the column titles, with `Column N` for ragged extra fields
-    /// and `""` for missing ones, so no data is dropped.
+    /// untyped); keys are the column titles, with `Column N` for ragged extra fields.
+    /// Keys are disambiguated within the object (`id`, `id_2`, …) so duplicate column
+    /// titles — or a generated `Column N` colliding with a real one — never produce
+    /// duplicate JSON keys (which every parser collapses, silently dropping data).
     static func appendJSONObject(_ fields: [String], columns: [String], into out: inout [UInt8]) {
         out.append(0x7B)                                          // {
         let count = max(fields.count, columns.count)
+        var used = Set<String>(); used.reserveCapacity(count)
         for i in 0..<count {
             if i > 0 { out.append(0x2C) }                         // ,
-            let key = i < columns.count ? columns[i] : "Column \(i + 1)"
+            var key = (i < columns.count && !columns[i].isEmpty) ? columns[i] : "Column \(i + 1)"
+            if used.contains(key) {
+                var k = 2
+                while used.contains("\(key)_\(k)") { k += 1 }
+                key = "\(key)_\(k)"
+            }
+            used.insert(key)
             appendJSONString(key, into: &out)
             out.append(0x3A)                                      // :
             appendJSONString(i < fields.count ? fields[i] : "", into: &out)

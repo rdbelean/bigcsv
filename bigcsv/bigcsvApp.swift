@@ -63,7 +63,7 @@ struct bigcsvApp: App {
                     }
                 }
                 .keyboardShortcut("e", modifiers: [.command, .shift])
-                .disabled(appModel.document == nil || (appModel.document?.exportableRowCount ?? 0) == 0)
+                .disabled(!(appModel.document?.canExport ?? false))
             }
             CommandGroup(after: .toolbar) {
                 Button("Go to Row…") { appModel.showGoToRow = true }

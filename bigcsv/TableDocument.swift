@@ -84,6 +84,7 @@ final class TableDocument: ObservableObject {
     private var sortTask: Task<Void, Never>?
     private var filterTask: Task<Void, Never>?
     private var exportTask: Task<Void, Never>?
+    private var exportGeneration = 0
     private var filterGeneration = 0
     private var lastFilterReload: TimeInterval = 0
     /// Maps visible positions to original rows (filter subset + sort order).
@@ -619,6 +620,10 @@ final class TableDocument: ObservableObject {
     /// Number of rows the current export would write (the visible/filtered count).
     var exportableRowCount: Int { projection.count }
 
+    /// Export is offered only once indexing is complete and there is at least one
+    /// row — this prevents writing a silently truncated file mid-index.
+    var canExport: Bool { progress.isComplete && exportableRowCount > 0 }
+
     /// A snapshot of what to export: the current view (filter + sort) re-serialized
     /// to `format`. The heavy work runs off-main in `ExportEngine`.
     private func buildExportRequest(format: ExportEngine.Format,
@@ -636,7 +641,10 @@ final class TableDocument: ObservableObject {
     /// Export the current view to `url`. Cancellable; on failure or cancellation the
     /// partial file is removed. Publishes progress and a completion result.
     func beginExport(to url: URL, format: ExportEngine.Format, includeHeader: Bool) {
+        guard canExport else { return }
         exportTask?.cancel()
+        exportGeneration += 1
+        let generation = exportGeneration
         isExporting = true
         exportProgress = 0
         exportError = nil
@@ -650,16 +658,24 @@ final class TableDocument: ObservableObject {
                 try await ExportEngine().export(
                     mapper: mapper, dialect: dialect, request: request, to: url,
                     onProgress: { fraction, _ in
-                        Task { @MainActor [weak self] in self?.exportProgress = fraction }
+                        Task { @MainActor [weak self] in
+                            guard let self, generation == self.exportGeneration else { return }
+                            self.exportProgress = fraction
+                        }
                     })
-                await MainActor.run { [weak self] in self?.finishExport(url: url, error: nil) }
+                await MainActor.run { [weak self] in
+                    self?.finishExport(generation: generation, url: url, error: nil, userCancelled: false)
+                }
             } catch is CancellationError {
                 try? FileManager.default.removeItem(at: url)
-                await MainActor.run { [weak self] in self?.finishExport(url: nil, error: nil) }
+                await MainActor.run { [weak self] in
+                    self?.finishExport(generation: generation, url: nil, error: nil, userCancelled: true)
+                }
             } catch {
                 try? FileManager.default.removeItem(at: url)
                 await MainActor.run { [weak self] in
-                    self?.finishExport(url: nil, error: error.localizedDescription)
+                    self?.finishExport(generation: generation, url: nil,
+                                       error: error.localizedDescription, userCancelled: false)
                 }
             }
         }
@@ -668,14 +684,27 @@ final class TableDocument: ObservableObject {
     func cancelExport() {
         exportTask?.cancel()
         exportTask = nil
+        exportGeneration += 1     // ignore the cancelled run's late completion hop
         isExporting = false
+        exportProgress = 0
     }
 
-    private func finishExport(url: URL?, error: String?) {
+    /// `generation` guards against a superseded run (a newer export or a cancel)
+    /// stomping live UI state. On a real finish we dismiss the sheet first and
+    /// publish the result on the next runloop tick, so the success/failure alert
+    /// presents after the sheet is gone (avoids a same-frame sheet↔alert clash).
+    private func finishExport(generation: Int, url: URL?, error: String?, userCancelled: Bool) {
+        guard generation == exportGeneration else { return }
         isExporting = false
         exportProgress = url == nil ? 0 : 1
-        lastExportURL = url
-        exportError = error
+        guard !userCancelled else { return }      // stay in the sheet (back to its config view)
+        exportSheetVisible = false
+        let resultURL = url, resultError = error
+        Task { @MainActor [weak self] in
+            guard let self, generation == self.exportGeneration else { return }
+            self.lastExportURL = resultURL
+            self.exportError = resultError
+        }
     }
 
     // MARK: File-change watch (guards against SIGBUS on truncation/replacement)

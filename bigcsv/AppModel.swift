@@ -27,6 +27,18 @@ final class AppModel: ObservableObject {
     /// Open a file URL (from NSOpenPanel, drag-drop, or Finder "Open With").
     /// Replaces any currently open document.
     func open(url: URL) {
+        // An in-flight export would be silently cancelled (and its partial file
+        // removed) by the teardown below — confirm first so it's never a surprise.
+        if document?.isExporting == true {
+            let alert = NSAlert()
+            alert.messageText = "An export is in progress"
+            alert.informativeText = "Opening another file will cancel the current export. Continue?"
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "Open Anyway")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+
         // Tear down the previous document first (cancels indexing, releases the
         // mmap, balances its security scope).
         document?.close()

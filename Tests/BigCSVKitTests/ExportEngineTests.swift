@@ -49,6 +49,24 @@ struct ExportSerializationTests {
         ExportEngine.appendJSONObject(["x"], columns: ["a", "b"], into: &out)
         #expect(String(decoding: out, as: UTF8.self) == "{\"a\":\"x\",\"b\":\"\"}")
     }
+    @Test func jsonObjectDeduplicatesDuplicateTitles() throws {
+        var out = [UInt8]()
+        ExportEngine.appendJSONObject(["1", "2", "3"], columns: ["id", "name", "id"], into: &out)
+        let obj = try JSONSerialization.jsonObject(with: Data(out)) as? [String: String]
+        #expect(obj?.count == 3)               // no key collapsed → no data lost
+        #expect(obj?["id"] == "1")
+        #expect(obj?["name"] == "2")
+        #expect(obj?["id_2"] == "3")
+    }
+    @Test func jsonObjectGeneratedKeyCollisionDisambiguated() throws {
+        // A real "Column 2" title plus a ragged extra field that also generates "Column 2".
+        var out = [UInt8]()
+        ExportEngine.appendJSONObject(["v0", "v1"], columns: ["Column 2"], into: &out)
+        let obj = try JSONSerialization.jsonObject(with: Data(out)) as? [String: String]
+        #expect(obj?.count == 2)
+        #expect(obj?["Column 2"] == "v0")
+        #expect(obj?["Column 2_2"] == "v1")
+    }
 }
 
 @Suite("ExportEngine (file)")
@@ -175,6 +193,31 @@ struct ExportEngineFileTests {
         try await ExportEngine().export(mapper: m, dialect: .default, request: req, to: url,
                                         onProgress: { _, _ in })
         #expect(try read(url) == "name,age\nAlice,20\nCarol,25\nBob,30\n")
+    }
+
+    @Test func sortOnlyShortOrderExportsEveryDisplayedRow() async throws {
+        // 3 rows but only a 2-long permutation of the first two (sort taken before the
+        // 3rd row was indexed). Display mirrors RowProjection: pos0→order[0]=1 (B),
+        // pos1→order[1]=0 (A), pos2→identity row 2 (C). Export must emit ALL three.
+        let (m, _) = try await TestSupport.buildIndex("n\nA\nB\nC\n", stride: 2)
+        let url = tmpURL()
+        let req = ExportEngine.Request(format: .csv, columns: ["n"], includeHeader: false,
+                                       recordOffset: 1, rowCount: 3, order: [1, 0])
+        try await ExportEngine().export(mapper: m, dialect: .default, request: req, to: url,
+                                        onProgress: { _, _ in })
+        #expect(try read(url) == "B\nA\nC\n")
+    }
+
+    @Test func filterSortOutOfRangeOrderYieldsEmptyRowNotTrap() async throws {
+        let (m, idx) = try await TestSupport.buildIndex("name,city\nAlice,Tokyo\nBob,Paris\n", stride: 2)
+        let url = tmpURL()
+        let subset = [offset(m, idx, record: 1), offset(m, idx, record: 2)]   // Alice, Bob
+        // order[1]=9 is out of range — that position emits an empty row, never traps.
+        let req = ExportEngine.Request(format: .csv, columns: ["name", "city"], includeHeader: false,
+                                       recordOffset: 1, rowCount: 2, subsetOffsets: subset, order: [0, 9])
+        try await ExportEngine().export(mapper: m, dialect: .default, request: req, to: url,
+                                        onProgress: { _, _ in })
+        #expect(try read(url) == "Alice,Tokyo\n\n")
     }
 
     @Test func progressReachesComplete() async throws {

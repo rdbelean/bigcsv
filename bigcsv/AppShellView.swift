@@ -94,8 +94,10 @@ struct DocumentView: View {
                 } label: {
                     Label("Export", systemImage: "square.and.arrow.up")
                 }
-                .help(purchase.isUnlocked ? "Export the current view" : "Export (Pro)")
-                .disabled(document.exportableRowCount == 0)
+                .help(purchase.isUnlocked
+                      ? (document.canExport ? "Export the current view" : "Export (available after indexing finishes)")
+                      : "Export (Pro)")
+                .disabled(!document.canExport)
             }
         }
         .sheet(isPresented: $appModel.showGoToRow) {
@@ -478,18 +480,14 @@ struct ExportSheet: View {
                     Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
                     Button("Export…", action: chooseDestinationAndExport)
                         .keyboardShortcut(.defaultAction)
-                        .disabled(document.exportableRowCount == 0)
+                        .disabled(!document.canExport)
                 }
             }
         }
         .padding(20)
         .frame(width: 400)
-        .onChange(of: document.isExporting) { _, exporting in
-            // Close once a run finishes (success or error); stay open on user-cancel.
-            if !exporting && (document.lastExportURL != nil || document.exportError != nil) {
-                dismiss()
-            }
-        }
+        // The document dismisses this sheet (via exportSheetVisible) when an export
+        // finishes, then presents the result alert — so no onChange dismiss here.
     }
 
     private func chooseDestinationAndExport() {
@@ -497,8 +495,20 @@ struct ExportSheet: View {
         panel.allowedContentTypes = [format.utType]
         panel.canCreateDirectories = true
         panel.nameFieldStringValue =
-            document.fileURL.deletingPathExtension().lastPathComponent + "." + format.fileExtension
+            document.fileURL.deletingPathExtension().lastPathComponent + " (export)." + format.fileExtension
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        // Never export over the file we're viewing: it's mmap'd, so truncating it
+        // would lose the original (on a filtered/sorted export) and risks a SIGBUS.
+        if url.resolvingSymlinksInPath().standardizedFileURL
+            == document.fileURL.resolvingSymlinksInPath().standardizedFileURL {
+            let alert = NSAlert()
+            alert.messageText = "Choose a different file"
+            alert.informativeText = "You can’t export over the file you’re viewing. "
+                + "Pick another name or folder."
+            alert.alertStyle = .warning
+            alert.runModal()
+            return
+        }
         document.beginExport(to: url, format: format, includeHeader: includeHeader)
     }
 }
