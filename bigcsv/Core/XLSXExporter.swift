@@ -66,6 +66,7 @@ public nonisolated struct XLSXExporter: Sendable {
         try zip.addStored(name: "xl/styles.xml", data: Self.stylesXML)
         try zip.addStoredFromFile(name: "xl/worksheets/sheet1.xml",
                                   fileURL: sheetTmp, crc: sheet.crc, size: sheet.size)
+        try Task.checkCancellation()
         try zip.finish()
 
         onProgress(1, true)
@@ -114,7 +115,7 @@ public nonisolated struct XLSXExporter: Sendable {
             while colLetters.count < count { colLetters.append(Self.columnLetters(colLetters.count)) }
         }
 
-        func writeRow(_ fields: [String]) {
+        func writeRow(_ fields: [String], forceText: Bool = false) {
             sheetRow += 1
             out.append(contentsOf: Self.rowOpen)                       // <row r="
             out.append(contentsOf: Self.ascii(sheetRow))
@@ -122,17 +123,20 @@ public nonisolated struct XLSXExporter: Sendable {
             let cols = min(fields.count, Self.maxColumns)
             if fields.count > Self.maxColumns { truncated = true }
             if cols > colLetters.count { ensureColumnLetters(cols) }
+            let rowDigits = Self.ascii(sheetRow)
             for c in 0..<cols {
                 let field = fields[c]
                 if field.isEmpty { continue }                          // blank cell → omit
-                Self.appendCell(field, colRef: colLetters[c], rowDigits: Self.ascii(sheetRow), into: &out)
+                Self.appendCell(field, colRef: colLetters[c], rowDigits: rowDigits,
+                                forceText: forceText, into: &out)
             }
             out.append(contentsOf: Self.rowClose)                      // </row>
         }
 
-        // Header row (column titles, always text).
+        // Header row: column titles are always text, even if a title looks numeric
+        // (e.g. a year like "2023") — it's a label, not a value.
         if includeHeader {
-            writeRow(columns)
+            writeRow(columns, forceText: true)
             try flush(force: false)
         }
 
@@ -161,13 +165,14 @@ public nonisolated struct XLSXExporter: Sendable {
 
     /// `<c r="A1"><v>123</v></c>` for numbers, else
     /// `<c r="A1" t="inlineStr"><is><t xml:space="preserve">text</t></is></c>`.
-    static func appendCell(_ field: String, colRef: [UInt8], rowDigits: [UInt8], into out: inout [UInt8]) {
+    static func appendCell(_ field: String, colRef: [UInt8], rowDigits: [UInt8],
+                           forceText: Bool = false, into out: inout [UInt8]) {
         out.append(0x3C); out.append(0x63)                            // <c
         out.append(contentsOf: cellRefAttr)                           //  r="
         out.append(contentsOf: colRef)
         out.append(contentsOf: rowDigits)
         out.append(0x22)                                              // "
-        if let number = numericLiteral(field) {
+        if !forceText, let number = numericLiteral(field) {
             out.append(0x3E)                                          // >
             out.append(contentsOf: vOpen)                             // <v>
             out.append(contentsOf: number.utf8)
@@ -187,8 +192,17 @@ public nonisolated struct XLSXExporter: Sendable {
         guard !t.isEmpty else { return nil }
         let u = Array(t.utf8)
         if u.count >= 2, u[0] == 0x30, u[1] >= 0x30, u[1] <= 0x39 { return nil }   // 0 then digit
-        if isXSDDouble(u) { return t }                              // already a clean number literal
-        return europeanNumber(t)                                    // strict locale-grouped form, or nil
+        if isXSDDouble(u) { return finiteOrNil(t) }                 // already a clean number literal
+        if let euro = europeanNumber(t) { return finiteOrNil(euro) }
+        return nil
+    }
+
+    /// Reject a literal that overflows IEEE-754 to ±infinity (e.g. "1e500", a
+    /// 350-digit integer). Excel reads `<v>` as a double, so an overflowing literal
+    /// would load as a numeric error — keep it as text instead.
+    private static func finiteOrNil(_ literal: String) -> String? {
+        guard let d = Double(literal), d.isFinite else { return nil }
+        return literal
     }
 
     /// Strictly validates a European-formatted number (`1.234.567,89`, `1,5`) and
@@ -208,7 +222,14 @@ public nonisolated struct XLSXExporter: Sendable {
         let intPart = parts[0]
         let frac = parts.count == 2 ? parts[1] : nil
         if let frac { guard !frac.isEmpty, frac.allSatisfy(\.isASCIIDigit) else { return nil } }
-        guard isValidGroupedInteger(intPart) else { return nil }
+        // Dot grouping (thousands) is honored ONLY when an explicit decimal comma is
+        // present. A bare dotted run ("1.234.567", "192.168.001") is ambiguous — it
+        // could be an IP, a version, or a zero-padded ID — so it stays text.
+        if frac == nil {
+            guard !intPart.isEmpty, intPart.allSatisfy(\.isASCIIDigit) else { return nil }
+        } else {
+            guard isValidGroupedInteger(intPart) else { return nil }
+        }
         let intDigits = intPart.filter { $0 != "." }
         guard !intDigits.isEmpty else { return nil }
         return sign + intDigits + (frac.map { "." + $0 } ?? "")

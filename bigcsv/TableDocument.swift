@@ -288,7 +288,9 @@ final class TableDocument: ObservableObject {
         filterTask = nil
         exportTask?.cancel()
         exportTask = nil
+        exportGeneration += 1     // a superseded export's late completion must be ignored
         isExporting = false
+        exportProgress = 0
         filterGeneration += 1
         projection.order = nil
         projection.base = nil

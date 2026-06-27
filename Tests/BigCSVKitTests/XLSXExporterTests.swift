@@ -31,6 +31,25 @@ struct XLSXSerializationTests {
         #expect(XLSXExporter.numericLiteral("1.2.3") == nil)
         #expect(XLSXExporter.numericLiteral("12px") == nil)
     }
+    @Test func ambiguousDottedRunsStayText() {
+        // No decimal comma → dot grouping is NOT honored (IP / version / grouped IDs).
+        #expect(XLSXExporter.numericLiteral("1.234.567") == nil)
+        #expect(XLSXExporter.numericLiteral("192.168.001") == nil)
+        #expect(XLSXExporter.numericLiteral("123.456.789") == nil)
+        // But a real European decimal still parses.
+        #expect(XLSXExporter.numericLiteral("1.234.567,89") == "1234567.89")
+    }
+    @Test func overflowingNumbersStayText() {
+        #expect(XLSXExporter.numericLiteral("1e500") == nil)             // → +inf as a double
+        #expect(XLSXExporter.numericLiteral(String(repeating: "9", count: 350)) == nil)
+    }
+    @Test func forceTextKeepsNumericLookingHeadersAsStrings() {
+        var out = [UInt8]()
+        XLSXExporter.appendCell("2023", colRef: Array("A".utf8), rowDigits: Array("1".utf8),
+                                forceText: true, into: &out)
+        #expect(String(decoding: out, as: UTF8.self)
+                == "<c r=\"A1\" t=\"inlineStr\"><is><t xml:space=\"preserve\">2023</t></is></c>")
+    }
     @Test func columnLetters() {
         #expect(String(decoding: XLSXExporter.columnLetters(0), as: UTF8.self) == "A")
         #expect(String(decoding: XLSXExporter.columnLetters(25), as: UTF8.self) == "Z")
@@ -157,6 +176,21 @@ struct XLSXFileTests {
         #expect(carol.lowerBound < alice.lowerBound)
         #expect(sheet.contains("<c r=\"B1\"><v>40</v></c>"))
         #expect(sheet.contains("<c r=\"B2\"><v>30</v></c>"))
+    }
+
+    @Test func numericHeaderIsWrittenAsText() async throws {
+        let (m, _) = try await TestSupport.buildIndex("2023,name\n10,Alice\n", stride: 2)
+        let url = tmpURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let source = ExportRowSource(mapper: m, dialect: .default,
+                                     subsetOffsets: nil, order: nil, recordOffset: 1, rowCount: 1)
+        _ = try await XLSXExporter().export(source: source, columns: ["2023", "name"],
+                                            includeHeader: true, to: url, onProgress: { _, _ in })
+        let sheet = String(decoding: try unzipStored(Data(contentsOf: url))["xl/worksheets/sheet1.xml"]!,
+                           as: UTF8.self)
+        // Header "2023" stays a label (inlineStr), while the data 10 is a real number.
+        #expect(sheet.contains("<c r=\"A1\" t=\"inlineStr\"><is><t xml:space=\"preserve\">2023</t></is></c>"))
+        #expect(sheet.contains("<c r=\"A2\"><v>10</v></c>"))
     }
 
     @Test func emptyCellsAreOmitted() async throws {

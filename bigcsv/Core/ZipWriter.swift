@@ -55,6 +55,7 @@ final class ZipWriter {
             defer { try? reader.close() }
             var copied = 0
             while let chunk = try reader.read(upToCount: 256 * 1024), !chunk.isEmpty {
+                try Task.checkCancellation()        // stay responsive during a large tail copy
                 try h.write(contentsOf: chunk)
                 copied += chunk.count
             }
