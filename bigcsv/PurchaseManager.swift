@@ -45,14 +45,18 @@ final class PurchaseManager: ObservableObject {
     @Published private(set) var product: Product?
     @Published private(set) var purchaseState: PurchaseState = .idle
     @Published var paywallContext: PaywallContext?
+    /// True once the initial entitlement check has finished — so first-launch UI
+    /// (the welcome sheet) can wait for the real `isUnlocked` instead of the
+    /// momentary `false` before StoreKit loads.
+    @Published private(set) var entitlementsLoaded = false
 
     private var updatesTask: Task<Void, Never>?
 
     private init() {
         // The free direct build has nothing to purchase or restore — skip all of StoreKit.
-        guard !BuildFlavor.isDirectFreeBuild else { return }
+        guard !BuildFlavor.isDirectFreeBuild else { entitlementsLoaded = true; return }
         updatesTask = listenForTransactions()
-        Task { await loadProduct(); await refreshEntitlements() }
+        Task { await loadProduct(); await refreshEntitlements(); entitlementsLoaded = true }
     }
 
     deinit { updatesTask?.cancel() }

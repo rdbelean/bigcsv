@@ -44,7 +44,14 @@ struct AppShellView: View {
         .sheet(isPresented: $appModel.showWelcome) {
             WelcomeSheet(purchase: purchase)
         }
-        .onAppear { appModel.maybeShowWelcome(unlocked: purchase.isUnlocked) }
+        // Decide only after StoreKit's first entitlement check, so an already-unlocked
+        // user never sees a momentary flash. maybeShowWelcome is once-only + idempotent.
+        .onAppear {
+            if purchase.entitlementsLoaded { appModel.maybeShowWelcome(unlocked: purchase.isUnlocked) }
+        }
+        .onChange(of: purchase.entitlementsLoaded) { _, loaded in
+            if loaded { appModel.maybeShowWelcome(unlocked: purchase.isUnlocked) }
+        }
     }
 }
 
