@@ -44,4 +44,40 @@ struct SortEngineTests {
         #expect(SortEngine.isNumericColumn(["1", "2", "3", "", ""]))
         #expect(!SortEngine.isNumericColumn(["apple", "banana", "cherry"]))
     }
+
+    // MARK: Filtered-subset sort (sort by explicit byte offsets)
+
+    /// Byte start of each record, used to build the subset offset list a filter
+    /// would have captured.
+    private func offset(_ m: FileMapper, _ idx: RecordIndex, record: Int) -> Int {
+        idx.byteRange(forRow: record, mapper: m, dialect: .default)!.lowerBound
+    }
+
+    @Test func subsetNumericAscending() async throws {
+        let (m, idx) = try await TestSupport.buildIndex(sample, stride: 2)
+        // Filtered subset in arbitrary order: Bob(30), Carol(25), Alice(20).
+        let offsets = [offset(m, idx, record: 1), offset(m, idx, record: 3), offset(m, idx, record: 2)]
+        let perm = await SortEngine().sortedPermutation(
+            mapper: m, dialect: .default, column: 1, order: .ascending,
+            offsets: offsets, onProgress: { _ in })
+        #expect(perm == [2, 1, 0])      // subset-space: Alice(20), Carol(25), Bob(30)
+    }
+
+    @Test func subsetTextDescending() async throws {
+        let (m, idx) = try await TestSupport.buildIndex(sample, stride: 2)
+        let offsets = [offset(m, idx, record: 1), offset(m, idx, record: 2), offset(m, idx, record: 3)]
+        let perm = await SortEngine().sortedPermutation(
+            mapper: m, dialect: .default, column: 0, order: .descending,
+            offsets: offsets, onProgress: { _ in })
+        // subset: Bob(0), Alice(1), Carol(2). Descending by name → Carol, Bob, Alice.
+        #expect(perm == [2, 0, 1])
+    }
+
+    @Test func subsetEmptyOffsets() async throws {
+        let (m, _) = try await TestSupport.buildIndex(sample, stride: 2)
+        let perm = await SortEngine().sortedPermutation(
+            mapper: m, dialect: .default, column: 0, order: .ascending,
+            offsets: [], onProgress: { _ in })
+        #expect(perm == [])
+    }
 }

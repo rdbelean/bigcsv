@@ -431,20 +431,52 @@ final class TableDocument: ObservableObject {
         isSorting = true
         sortProgress = 0
         let mapper = self.mapper
-        let index = self.index
         let dialect = self.dialect
-        let recordOffset = dialect.hasHeader ? 1 : 0
-        let rowCount = displayRowCount
 
-        sortTask = Task {
-            let perm = await SortEngine().sortedPermutation(
-                mapper: mapper, index: index, dialect: dialect,
-                column: column, order: order, recordOffset: recordOffset, rowCount: rowCount,
-                onProgress: { fraction in
-                    Task { @MainActor [weak self] in self?.sortProgress = fraction }
-                })
-            await MainActor.run { [weak self] in self?.applySort(perm) }
+        // Filtered: sort only the matching rows, reading each at its captured byte
+        // offset — the permutation lands in subset-index space (what `order` wants
+        // while a filter is active). Unfiltered: the full sequential scan.
+        if let offsets = filterOffsets {
+            sortTask = Task {
+                let perm = await SortEngine().sortedPermutation(
+                    mapper: mapper, dialect: dialect, column: column, order: order,
+                    offsets: offsets,
+                    onProgress: { fraction in
+                        Task { @MainActor [weak self] in self?.sortProgress = fraction }
+                    })
+                await MainActor.run { [weak self] in self?.applySort(perm) }
+            }
+        } else {
+            let index = self.index
+            let recordOffset = dialect.hasHeader ? 1 : 0
+            let rowCount = projection.totalRows
+            sortTask = Task {
+                let perm = await SortEngine().sortedPermutation(
+                    mapper: mapper, index: index, dialect: dialect,
+                    column: column, order: order, recordOffset: recordOffset, rowCount: rowCount,
+                    onProgress: { fraction in
+                        Task { @MainActor [weak self] in self?.sortProgress = fraction }
+                    })
+                await MainActor.run { [weak self] in self?.applySort(perm) }
+            }
         }
+    }
+
+    /// Re-run the active sort (if any) over the current row set. Called when the
+    /// filtered subset changes (filter completed or cleared) so the sort follows
+    /// the new subset instead of leaving a stale, wrong-length permutation.
+    private func reapplySort() {
+        guard let column = sortColumn else { return }
+        // If the (possibly broadened) subset now exceeds the sort cap, drop the sort
+        // rather than sort a huge set off the back of a filter change.
+        if projection.count > sortRowCap {
+            projection.order = nil
+            sortColumn = nil
+            isSorting = false
+            onProjectionChanged?()
+            return
+        }
+        runSort(column: column, order: sortAscending ? .ascending : .descending)
     }
 
     private func applySort(_ perm: [UInt32]?) {
@@ -465,9 +497,11 @@ final class TableDocument: ObservableObject {
         filterGeneration += 1
         let generation = filterGeneration
         clearSearch()
-        // Filter-only for now: any active sort is dropped (composition is Slice 3).
+        // The subset is about to change, so cancel any running sort and drop the
+        // (now wrong-length) permutation — but KEEP `sortColumn`: once the filter
+        // finishes we re-sort the new subset by the same column (Slice 3).
+        sortTask?.cancel()
         projection.order = nil
-        sortColumn = nil
         isSorting = false
         lastFilterReload = 0
 
@@ -487,6 +521,7 @@ final class TableDocument: ObservableObject {
             filterMatchCount = 0
             displayRowCount = projection.count
             onProjectionChanged?()
+            reapplySort()                 // no filter ⇒ sort the full set (if any)
             return
         }
 
@@ -541,8 +576,11 @@ final class TableDocument: ObservableObject {
         projection.base = everythingMatched ? nil : snap.rows
         filterOffsets = everythingMatched ? nil : snap.offsets
         displayRowCount = projection.count
-        if isComplete { isFiltering = false }
         onProjectionChanged?()
+        if isComplete {
+            isFiltering = false
+            reapplySort()                 // sort the final filtered subset (if a sort is active)
+        }
     }
 
     func clearFilter() {
@@ -552,11 +590,15 @@ final class TableDocument: ObservableObject {
         filterSet = FilterSet()
         projection.base = nil
         filterOffsets = nil
+        // The subset-space sort permutation no longer fits the full set; drop it,
+        // then re-sort the full set by the same column if a sort was active.
+        projection.order = nil
         isFiltering = false
         filterProgress = 1
         filterMatchCount = 0
         displayRowCount = projection.count
         onProjectionChanged?()
+        reapplySort()
     }
 
     // MARK: File-change watch (guards against SIGBUS on truncation/replacement)

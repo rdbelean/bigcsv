@@ -60,14 +60,57 @@ public nonisolated struct SortEngine: Sendable {
         while keys.count < rowCount { keys.append("") }    // tolerate a short tail
         if Task.isCancelled { return nil }
 
-        // 2) Numeric column? (most non-empty values parse as a number)
-        let numeric = Self.isNumericColumn(keys)
+        let perm = Self.permutation(keys: keys, order: order)
+        onProgress(1)
+        return perm
+    }
 
-        // 3) Sort an index permutation by the keys.
-        var perm = Array(0..<rowCount).map { UInt32($0) }
+    /// Returns a permutation of `0..<offsets.count` sorted by `column`, reading
+    /// each row directly from its byte start `offset`. Used to sort the **filtered
+    /// subset**: `offsets` are the byte starts of the matching rows (subset-index
+    /// space), so the returned permutation maps visible positions to subset indices
+    /// — exactly what `RowProjection.order` expects when a filter is active.
+    public func sortedPermutation(mapper: FileMapper,
+                                  dialect: CSVDialect,
+                                  column: Int,
+                                  order: Order,
+                                  offsets: [Int],
+                                  onProgress: @Sendable (Double) -> Void) async -> [UInt32]? {
+        guard !offsets.isEmpty else { return [] }
+        let bytes = mapper.bytes
+        let n = bytes.count
+        let delimiter = dialect.delimiter.byte
+        let quote = dialect.quote
+
+        var keys = [String]()
+        keys.reserveCapacity(offsets.count)
+        for (i, off) in offsets.enumerated() {
+            if Task.isCancelled { return nil }
+            guard off >= 0, off < n else { keys.append(""); continue }
+            let next = RecordScanner.nextRecordStart(bytes, from: off, delimiter: delimiter, quote: quote)
+            let fields = CSVParser.parseRecord(
+                UnsafeRawBufferPointer(rebasing: bytes[off..<min(next, n)]), dialect: dialect)
+            keys.append(column < fields.count ? fields[column] : "")
+            if i & 0xFFFF == 0 {
+                onProgress(Double(i) / Double(offsets.count))
+                await Task.yield()
+            }
+        }
+        if Task.isCancelled { return nil }
+
+        let perm = Self.permutation(keys: keys, order: order)
+        onProgress(1)
+        return perm
+    }
+
+    /// Sort an index permutation by extracted keys — numeric (locale-aware) when
+    /// the column looks numeric, else Finder-style localized text. Stable.
+    static func permutation(keys: [String], order: Order) -> [UInt32] {
+        let numeric = isNumericColumn(keys)
+        var perm = Array(0..<keys.count).map { UInt32($0) }
         let ascending = order == .ascending
         if numeric {
-            let values = keys.map { Self.numericValue($0) }
+            let values = keys.map { numericValue($0) }
             perm.sort { a, b in
                 let x = values[Int(a)], y = values[Int(b)]
                 if x == y { return a < b }                  // stable
@@ -80,7 +123,6 @@ public nonisolated struct SortEngine: Sendable {
                 return ascending ? (r == .orderedAscending) : (r == .orderedDescending)
             }
         }
-        onProgress(1)
         return perm
     }
 
