@@ -8,6 +8,10 @@
 	<!-- App Store category (required for Mac App Store submission). -->
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.productivity</string>
+	<!-- No encryption beyond what's exempt → pre-answer export compliance so future
+	     uploads don't ask the encryption question. BigCSV has no crypto and no network. -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<!-- Declare the document types we can open so Finder "Open With" / double-click work.
 	     We use system-declared UTIs (no custom UTI needed) and rank Alternate so we don't
 	     steal CSV ownership from Numbers/Excel. Role is Viewer: we are strictly read-only. -->
