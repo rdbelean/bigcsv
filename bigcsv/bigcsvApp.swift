@@ -56,6 +56,15 @@ struct bigcsvApp: App {
                 }
                 .disabled(appModel.recentFiles.isEmpty)
             }
+            CommandGroup(after: .importExport) {
+                Button("Export…") {
+                    if let doc = appModel.document {
+                        purchase.requireUnlock(.export) { doc.exportSheetVisible = true }
+                    }
+                }
+                .keyboardShortcut("e", modifiers: [.command, .shift])
+                .disabled(appModel.document == nil || (appModel.document?.exportableRowCount ?? 0) == 0)
+            }
             CommandGroup(after: .toolbar) {
                 Button("Go to Row…") { appModel.showGoToRow = true }
                     .keyboardShortcut("l", modifiers: .command)

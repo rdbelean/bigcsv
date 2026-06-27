@@ -55,6 +55,15 @@ final class TableDocument: ObservableObject {
     @Published private(set) var filterProgress: Double = 0
     @Published private(set) var filterMatchCount = 0
 
+    // Export
+    @Published var exportSheetVisible = false
+    @Published private(set) var isExporting = false
+    @Published private(set) var exportProgress: Double = 0
+    /// Set on a successful export (drives a "Show in Finder" confirmation).
+    @Published var lastExportURL: URL?
+    /// Set on a failed export (drives an error alert). Nil while idle.
+    @Published var exportError: String?
+
     /// Invoked (coalesced by the table view) whenever the indexed row count grows.
     var onIndexUpdate: (() -> Void)?
     /// Set by the table view; asks it to scroll a display row into view.
@@ -74,6 +83,7 @@ final class TableDocument: ObservableObject {
     private var didJumpToFirstMatch = false
     private var sortTask: Task<Void, Never>?
     private var filterTask: Task<Void, Never>?
+    private var exportTask: Task<Void, Never>?
     private var filterGeneration = 0
     private var lastFilterReload: TimeInterval = 0
     /// Maps visible positions to original rows (filter subset + sort order).
@@ -273,6 +283,9 @@ final class TableDocument: ObservableObject {
         sortTask = nil
         filterTask?.cancel()
         filterTask = nil
+        exportTask?.cancel()
+        exportTask = nil
+        isExporting = false
         filterGeneration += 1
         projection.order = nil
         projection.base = nil
@@ -601,6 +614,70 @@ final class TableDocument: ObservableObject {
         reapplySort()
     }
 
+    // MARK: Export
+
+    /// Number of rows the current export would write (the visible/filtered count).
+    var exportableRowCount: Int { projection.count }
+
+    /// A snapshot of what to export: the current view (filter + sort) re-serialized
+    /// to `format`. The heavy work runs off-main in `ExportEngine`.
+    private func buildExportRequest(format: ExportEngine.Format,
+                                    includeHeader: Bool) -> ExportEngine.Request {
+        ExportEngine.Request(
+            format: format,
+            columns: columnTitles,
+            includeHeader: includeHeader,
+            recordOffset: dialect.hasHeader ? 1 : 0,
+            rowCount: projection.totalRows,
+            subsetOffsets: filterOffsets,
+            order: projection.order)
+    }
+
+    /// Export the current view to `url`. Cancellable; on failure or cancellation the
+    /// partial file is removed. Publishes progress and a completion result.
+    func beginExport(to url: URL, format: ExportEngine.Format, includeHeader: Bool) {
+        exportTask?.cancel()
+        isExporting = true
+        exportProgress = 0
+        exportError = nil
+        lastExportURL = nil
+        let request = buildExportRequest(format: format, includeHeader: includeHeader)
+        let mapper = self.mapper
+        let dialect = self.dialect
+
+        exportTask = Task {
+            do {
+                try await ExportEngine().export(
+                    mapper: mapper, dialect: dialect, request: request, to: url,
+                    onProgress: { fraction, _ in
+                        Task { @MainActor [weak self] in self?.exportProgress = fraction }
+                    })
+                await MainActor.run { [weak self] in self?.finishExport(url: url, error: nil) }
+            } catch is CancellationError {
+                try? FileManager.default.removeItem(at: url)
+                await MainActor.run { [weak self] in self?.finishExport(url: nil, error: nil) }
+            } catch {
+                try? FileManager.default.removeItem(at: url)
+                await MainActor.run { [weak self] in
+                    self?.finishExport(url: nil, error: error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    func cancelExport() {
+        exportTask?.cancel()
+        exportTask = nil
+        isExporting = false
+    }
+
+    private func finishExport(url: URL?, error: String?) {
+        isExporting = false
+        exportProgress = url == nil ? 0 : 1
+        lastExportURL = url
+        exportError = error
+    }
+
     // MARK: File-change watch (guards against SIGBUS on truncation/replacement)
 
     private func startWatchingFile() {
@@ -637,6 +714,8 @@ final class TableDocument: ObservableObject {
         sortTask = nil
         filterTask?.cancel()
         filterTask = nil
+        exportTask?.cancel()
+        exportTask = nil
         stopWatchingFile()
         if securityScoped {
             fileURL.stopAccessingSecurityScopedResource()

@@ -5,8 +5,10 @@
 	<!-- App Store sandbox. -->
 	<key>com.apple.security.app-sandbox</key>
 	<true/>
-	<!-- Read-only access to files the user explicitly opens (NSOpenPanel, drag-drop, Open With). -->
-	<key>com.apple.security.files.user-selected.read-only</key>
+	<!-- Read/write access to files the user explicitly opens or chooses (NSOpenPanel,
+	     drag-drop, Open With, and the export Save panel). Read-write is required so
+	     the Pro export feature can write the file the user picks. -->
+	<key>com.apple.security.files.user-selected.read-write</key>
 	<true/>
 	<!-- App-scoped security bookmarks so "Recent Files" can reopen across launches. -->
 	<key>com.apple.security.files.bookmarks.app-scope</key>

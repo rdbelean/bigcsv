@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import UniformTypeIdentifiers
 
 /// The window's root view: either the empty drop-zone (no file open) or the
@@ -87,6 +88,15 @@ struct DocumentView: View {
                 }
                 .help(purchase.isUnlocked ? "Filter rows" : "Filter rows (Pro)")
             }
+            ToolbarItem {
+                Button {
+                    purchase.requireUnlock(.export) { document.exportSheetVisible = true }
+                } label: {
+                    Label("Export", systemImage: "square.and.arrow.up")
+                }
+                .help(purchase.isUnlocked ? "Export the current view" : "Export (Pro)")
+                .disabled(document.exportableRowCount == 0)
+            }
         }
         .sheet(isPresented: $appModel.showGoToRow) {
             GoToRowSheet(document: document)
@@ -102,6 +112,29 @@ struct DocumentView: View {
             Button("OK", role: .cancel) { document.transientMessage = nil }
         } message: {
             Text(document.transientMessage ?? "")
+        }
+        .sheet(isPresented: $document.exportSheetVisible) {
+            ExportSheet(document: document)
+        }
+        .alert("Export complete",
+               isPresented: Binding(get: { document.lastExportURL != nil },
+                                    set: { if !$0 { document.lastExportURL = nil } })) {
+            Button("Show in Finder") {
+                if let url = document.lastExportURL {
+                    NSWorkspace.shared.activateFileViewerSelecting([url])
+                }
+                document.lastExportURL = nil
+            }
+            Button("OK", role: .cancel) { document.lastExportURL = nil }
+        } message: {
+            Text("Exported to “\(document.lastExportURL?.lastPathComponent ?? "")”.")
+        }
+        .alert("Export failed",
+               isPresented: Binding(get: { document.exportError != nil },
+                                    set: { if !$0 { document.exportError = nil } })) {
+            Button("OK", role: .cancel) { document.exportError = nil }
+        } message: {
+            Text(document.exportError ?? "")
         }
     }
 }
@@ -366,7 +399,13 @@ struct StatusBarView: View {
             Text(document.dialect.encoding.displayName)
                 .foregroundStyle(.secondary).help("Text encoding")
 
-            if document.isSorting {
+            if document.isExporting {
+                HStack(spacing: 8) {
+                    ProgressView(value: document.exportProgress).frame(width: 120)
+                    Text("Exporting… \(Int(document.exportProgress * 100))%")
+                        .foregroundStyle(.secondary).monospacedDigit()
+                }
+            } else if document.isSorting {
                 HStack(spacing: 8) {
                     ProgressView(value: document.sortProgress).frame(width: 120)
                     Text("Sorting… \(Int(document.sortProgress * 100))%")
@@ -395,5 +434,88 @@ struct StatusBarView: View {
 
     private var fileSizeText: String {
         ByteCountFormatter.string(fromByteCount: Int64(document.fileSize), countStyle: .file)
+    }
+}
+
+/// Export sheet (Pro): pick a format + header option, then a Save panel. Shows
+/// live progress with Cancel while the streaming export runs, and auto-dismisses
+/// on completion (the parent shows the success / failure alert).
+struct ExportSheet: View {
+    @ObservedObject var document: TableDocument
+    @Environment(\.dismiss) private var dismiss
+    @State private var format: ExportEngine.Format = .csv
+    @State private var includeHeader = true
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Export").font(.headline)
+
+            if document.isExporting {
+                VStack(alignment: .leading, spacing: 10) {
+                    ProgressView(value: document.exportProgress)
+                    Text("Exporting… \(Int(document.exportProgress * 100))%")
+                        .foregroundStyle(.secondary).monospacedDigit()
+                    HStack {
+                        Spacer()
+                        Button("Cancel", role: .cancel) { document.cancelExport() }
+                    }
+                }
+            } else {
+                Text("\(document.exportableRowCount.formatted()) rows — the current view"
+                     + (document.filterSet.isEmpty ? "" : " (filtered)") + ".")
+                    .font(.callout).foregroundStyle(.secondary)
+                Picker("Format", selection: $format) {
+                    Text("CSV").tag(ExportEngine.Format.csv)
+                    Text("TSV").tag(ExportEngine.Format.tsv)
+                    Text("JSON").tag(ExportEngine.Format.json)
+                }
+                .pickerStyle(.segmented)
+                if format != .json {
+                    Toggle("Include header row", isOn: $includeHeader)
+                }
+                HStack {
+                    Spacer()
+                    Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+                    Button("Export…", action: chooseDestinationAndExport)
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(document.exportableRowCount == 0)
+                }
+            }
+        }
+        .padding(20)
+        .frame(width: 400)
+        .onChange(of: document.isExporting) { _, exporting in
+            // Close once a run finishes (success or error); stay open on user-cancel.
+            if !exporting && (document.lastExportURL != nil || document.exportError != nil) {
+                dismiss()
+            }
+        }
+    }
+
+    private func chooseDestinationAndExport() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [format.utType]
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue =
+            document.fileURL.deletingPathExtension().lastPathComponent + "." + format.fileExtension
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        document.beginExport(to: url, format: format, includeHeader: includeHeader)
+    }
+}
+
+private extension ExportEngine.Format {
+    var fileExtension: String {
+        switch self {
+        case .csv: return "csv"
+        case .tsv: return "tsv"
+        case .json: return "json"
+        }
+    }
+    var utType: UTType {
+        switch self {
+        case .csv: return .commaSeparatedText
+        case .tsv: return .tabSeparatedText
+        case .json: return .json
+        }
     }
 }

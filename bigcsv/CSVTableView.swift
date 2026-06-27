@@ -489,11 +489,15 @@ struct CSVTableView: NSViewRepresentable {
         /// per line) — pastes straight into Excel/Numbers.
         func copySelectionToPasteboard() {
             guard let table = tableView, !table.selectedRowIndexes.isEmpty else { return }
-            let lines = table.selectedRowIndexes.map { physical -> String in
-                document.rowFields(displayRow: logical(physical)).joined(separator: "\t")
+            var out = [UInt8]()
+            for physical in table.selectedRowIndexes {
+                // Tab-delimited, with the same RFC-4180 quoting the export uses, so a
+                // cell containing a tab or newline doesn't corrupt the paste.
+                ExportEngine.appendDelimitedRow(
+                    document.rowFields(displayRow: logical(physical)), delimiter: 0x09, into: &out)
             }
             NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(lines.joined(separator: "\n"), forType: .string)
+            NSPasteboard.general.setString(String(decoding: out, as: UTF8.self), forType: .string)
         }
 
         // MARK: Selection (logical)
