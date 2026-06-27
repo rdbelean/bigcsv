@@ -92,7 +92,10 @@ final class TableDocument: ObservableObject, Identifiable {
     var onProjectionChanged: (() -> Void)?
 
     private(set) var index: RecordIndex
-    private let securityScoped: Bool
+    /// Whether we hold a security scope to balance. Cleared after the single stop so
+    /// close() + deinit can't both stop (which would underflow the per-URL count and,
+    /// on a same-file reopen, revoke the NEW document's access).
+    private var securityScoped: Bool
     private var indexTask: Task<Void, Never>?
     private var columnsComputed = false
     private var fileWatchSource: DispatchSourceFileSystemObject?
@@ -876,6 +879,7 @@ final class TableDocument: ObservableObject, Identifiable {
         stopWatchingFile()
         if securityScoped {
             fileURL.stopAccessingSecurityScopedResource()
+            securityScoped = false          // balance exactly once
         }
     }
 

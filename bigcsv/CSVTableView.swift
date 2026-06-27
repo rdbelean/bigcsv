@@ -47,10 +47,16 @@ struct CSVTableView: NSViewRepresentable {
         override var acceptsFirstResponder: Bool { true }
     }
 
-    /// NSTableView that copies the selected rows as TSV on ⌘C (Edit ▸ Copy).
+    /// NSTableView that copies the selected rows as TSV on ⌘C (Edit ▸ Copy), and
+    /// routes arrow/page/home/end to the coordinator so vertical navigation drives
+    /// the synthesized whole-file scroll instead of NSTableView's native
+    /// scrollRowToVisible (which would desync our `virtualY` and the frozen pane).
     final class CopyableTableView: NSTableView {
         weak var coordinator: Coordinator?
         @objc func copy(_ sender: Any?) { coordinator?.copySelectionToPasteboard() }
+        override func keyDown(with event: NSEvent) {
+            if coordinator?.handleKeyDown(event) != true { super.keyDown(with: event) }
+        }
     }
 
     // MARK: - Fixed, horizontally-syncable column header
@@ -313,7 +319,8 @@ struct CSVTableView: NSViewRepresentable {
             frozenS.borderType = .noBorder
             frozenS.automaticallyAdjustsContentInsets = false
             frozenS.contentInsets = NSEdgeInsetsZero
-            frozenS.drawsBackground = false
+            frozenS.drawsBackground = true                 // opaque: hides the main table's frozen copies
+            frozenS.backgroundColor = .controlBackgroundColor
             frozenS.translatesAutoresizingMaskIntoConstraints = false
             self.frozenScroll = frozenS
 
@@ -495,10 +502,12 @@ struct CSVTableView: NSViewRepresentable {
                 reprojectSelection()
             }
 
-            // Horizontal: never let the clip go left of the frozen pane (so the
-            // frozen columns' originals stay hidden behind it).
+            // Horizontal clamp to [0, maxX]. The frozen pane is an OPAQUE overlay on
+            // the left, so the main table's own copies of the frozen columns simply
+            // sit under it — no special left floor is needed (and a floor would push
+            // the first non-frozen column under the pane).
             let maxX = max(0, (tableView?.frame.width ?? 0) - clip.bounds.width)
-            let x = min(max(frozenWidth(), clipX ?? clip.bounds.origin.x), maxX)
+            let x = min(max(0, clipX ?? clip.bounds.origin.x), maxX)
             let y = CGFloat(topLogical - windowOrigin) * rowHeight + subRow
             CATransaction.begin(); CATransaction.setDisableActions(true)
             clip.setBoundsOrigin(NSPoint(x: x, y: y))
@@ -620,7 +629,9 @@ struct CSVTableView: NSViewRepresentable {
         /// Scroll horizontally so data column `dataColumn` is at the left edge
         /// (just after any frozen pane).
         func revealColumn(_ dataColumn: Int) {
-            guard let table = tableView, let clip = scrollView?.contentView else { return }
+            // A frozen column is always visible (pinned in the pane) — nothing to do.
+            if dataColumn < document.frozenColumnCount { return }
+            guard let table = tableView else { return }
             let id = NSUserInterfaceItemIdentifier("\(dataColumn)")
             let spacing = table.intercellSpacing.width
             var x: CGFloat = 0
@@ -628,8 +639,8 @@ struct CSVTableView: NSViewRepresentable {
                 if col.identifier == id { break }
                 x += col.width + spacing
             }
-            let maxX = max(0, table.frame.width - clip.bounds.width)
-            applyVirtual(clipX: min(max(frozenWidth(), x), maxX))
+            // Land the column just to the right of the frozen pane (applyVirtual clamps).
+            applyVirtual(clipX: max(0, x - frozenWidth()))
         }
 
         @objc private func handleDoubleClick(_ sender: Any?) {

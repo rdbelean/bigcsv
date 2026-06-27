@@ -51,14 +51,16 @@ final class AppModel: ObservableObject {
     /// Open a file URL (from NSOpenPanel, drag-drop, or Finder "Open With"). Pro opens
     /// it in a new tab; the free build replaces the single open document.
     func open(url: URL) {
-        let unlocked = PurchaseManager.shared.isUnlocked
-
-        // Already open (Pro multi-tab) → just switch to it.
-        if unlocked, let i = documents.firstIndex(where: {
-            $0.fileURL.standardizedFileURL == url.standardizedFileURL }) {
+        // Already open → just switch to it (a no-op in both free and Pro). Compare
+        // symlink-resolved paths so /tmp vs /private/tmp or an alias still matches.
+        let canonical = url.resolvingSymlinksInPath().standardizedFileURL
+        if let i = documents.firstIndex(where: {
+            $0.fileURL.resolvingSymlinksInPath().standardizedFileURL == canonical }) {
             activeIndex = i
             return
         }
+
+        let unlocked = PurchaseManager.shared.isUnlocked
 
         // Replacing the single free document would silently cancel an in-flight
         // export — confirm first.
