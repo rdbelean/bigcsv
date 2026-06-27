@@ -17,6 +17,8 @@ final class AppModel: ObservableObject {
     @Published var showGoToRow = false
     /// Recently opened files (Open Recent menu), persisted via security bookmarks.
     @Published private(set) var recentFiles: [RecentFile] = Bookmarks.load()
+    /// Named, reusable filters (Pro), persisted in UserDefaults.
+    @Published private(set) var savedFilters: [SavedFilter] = SavedFiltersStore.load()
 
     /// Re-open the current document's file (e.g. after it changed on disk).
     func reopenCurrent() {
@@ -83,6 +85,25 @@ final class AppModel: ObservableObject {
     func clearRecents() {
         recentFiles = []
         Bookmarks.save(recentFiles)
+    }
+
+    // MARK: Saved filters
+
+    /// Save (or overwrite by name) the given filter under `name`.
+    func saveFilter(named name: String, _ filterSet: FilterSet) {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return }
+        if let i = savedFilters.firstIndex(where: { $0.name.caseInsensitiveCompare(trimmed) == .orderedSame }) {
+            savedFilters[i].filterSet = filterSet
+        } else {
+            savedFilters.append(SavedFilter(name: trimmed, filterSet: filterSet))
+        }
+        SavedFiltersStore.save(savedFilters)
+    }
+
+    func deleteSavedFilter(_ filter: SavedFilter) {
+        savedFilters.removeAll { $0.id == filter.id }
+        SavedFiltersStore.save(savedFilters)
     }
 
     /// Present an open panel restricted to the delimited-text types we handle.
