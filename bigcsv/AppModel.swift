@@ -26,6 +26,19 @@ final class AppModel: ObservableObject {
     @Published var showGoToRow = false
     /// Drives the "Go to Column…" sheet.
     @Published var showGoToColumn = false
+    /// Drives the first-launch welcome / Pro upsell sheet.
+    @Published var showWelcome = false
+
+    private let welcomeShownKey = "com.rdb.bigcsv.hasSeenWelcome.v1"
+
+    /// Show the welcome sheet exactly once, on first launch of the paid build, when
+    /// Pro isn't already unlocked. The free direct/Homebrew build has nothing to sell.
+    func maybeShowWelcome(unlocked: Bool) {
+        guard !BuildFlavor.isDirectFreeBuild, !unlocked,
+              !UserDefaults.standard.bool(forKey: welcomeShownKey) else { return }
+        UserDefaults.standard.set(true, forKey: welcomeShownKey)
+        showWelcome = true
+    }
     /// Recently opened files (Open Recent menu), persisted via security bookmarks.
     @Published private(set) var recentFiles: [RecentFile] = Bookmarks.load()
     /// Named, reusable filters (Pro), persisted in UserDefaults.

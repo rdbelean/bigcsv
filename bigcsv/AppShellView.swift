@@ -41,6 +41,10 @@ struct AppShellView: View {
         .sheet(item: $purchase.paywallContext) { context in
             PaywallView(purchase: purchase, feature: context.feature)
         }
+        .sheet(isPresented: $appModel.showWelcome) {
+            WelcomeSheet(purchase: purchase)
+        }
+        .onAppear { appModel.maybeShowWelcome(unlocked: purchase.isUnlocked) }
     }
 }
 
