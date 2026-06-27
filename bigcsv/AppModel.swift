@@ -11,8 +11,17 @@ final class AppModel: ObservableObject {
 
     static let shared = AppModel()
 
-    @Published private(set) var document: TableDocument?
+    /// Open documents. Free builds hold at most one (opening replaces it); Pro opens
+    /// each file in its own tab.
+    @Published private(set) var documents: [TableDocument] = []
+    /// Index of the active document within `documents`.
+    @Published var activeIndex = 0
     @Published var errorMessage: String?
+
+    /// The active document (what the rest of the UI reads).
+    var document: TableDocument? {
+        documents.indices.contains(activeIndex) ? documents[activeIndex] : documents.last
+    }
     /// Drives the "Go to Row…" sheet (triggered by ⌘L).
     @Published var showGoToRow = false
     /// Drives the "Go to Column…" sheet.
@@ -22,18 +31,38 @@ final class AppModel: ObservableObject {
     /// Named, reusable filters (Pro), persisted in UserDefaults.
     @Published private(set) var savedFilters: [SavedFilter] = SavedFiltersStore.load()
 
-    /// Re-open the current document's file (e.g. after it changed on disk).
+    /// Re-open the current document's file in place (e.g. after it changed on disk).
     func reopenCurrent() {
-        guard let url = document?.fileURL else { return }
-        open(url: url)
+        guard let doc = document, let i = documents.firstIndex(where: { $0 === doc }) else { return }
+        let url = doc.fileURL
+        doc.close()
+        let scoped = url.startAccessingSecurityScopedResource()
+        do {
+            documents[i] = try TableDocument(url: url, securityScoped: scoped)
+            errorMessage = nil
+        } catch {
+            if scoped { url.stopAccessingSecurityScopedResource() }
+            documents.remove(at: i)
+            activeIndex = min(activeIndex, max(0, documents.count - 1))
+            errorMessage = "Could not reopen \(url.lastPathComponent): \(error.localizedDescription)"
+        }
     }
 
-    /// Open a file URL (from NSOpenPanel, drag-drop, or Finder "Open With").
-    /// Replaces any currently open document.
+    /// Open a file URL (from NSOpenPanel, drag-drop, or Finder "Open With"). Pro opens
+    /// it in a new tab; the free build replaces the single open document.
     func open(url: URL) {
-        // An in-flight export would be silently cancelled (and its partial file
-        // removed) by the teardown below — confirm first so it's never a surprise.
-        if document?.isExporting == true {
+        let unlocked = PurchaseManager.shared.isUnlocked
+
+        // Already open (Pro multi-tab) → just switch to it.
+        if unlocked, let i = documents.firstIndex(where: {
+            $0.fileURL.standardizedFileURL == url.standardizedFileURL }) {
+            activeIndex = i
+            return
+        }
+
+        // Replacing the single free document would silently cancel an in-flight
+        // export — confirm first.
+        if !unlocked, let existing = documents.first, existing.isExporting {
             let alert = NSAlert()
             alert.messageText = "An export is in progress"
             alert.informativeText = "Opening another file will cancel the current export. Continue?"
@@ -43,21 +72,46 @@ final class AppModel: ObservableObject {
             guard alert.runModal() == .alertFirstButtonReturn else { return }
         }
 
-        // Tear down the previous document first (cancels indexing, releases the
-        // mmap, balances its security scope).
-        document?.close()
-        document = nil
-
         // NSOpenPanel / Finder-opened files are session-granted; calling start is
-        // harmless and required when resolving from a bookmark later (Phase 3).
+        // harmless and required when resolving from a bookmark later.
         let scoped = url.startAccessingSecurityScopedResource()
         do {
-            document = try TableDocument(url: url, securityScoped: scoped)
+            let doc = try TableDocument(url: url, securityScoped: scoped)
+            if unlocked {
+                documents.append(doc)
+                activeIndex = documents.count - 1
+            } else {
+                documents.forEach { $0.close() }     // free: single document — replace
+                documents = [doc]
+                activeIndex = 0
+            }
             errorMessage = nil
-            rememberRecent(url)        // bookmark while we have access
+            rememberRecent(url)                       // bookmark while we have access
         } catch {
             if scoped { url.stopAccessingSecurityScopedResource() }
             errorMessage = "Could not open \(url.lastPathComponent): \(error.localizedDescription)"
+        }
+    }
+
+    /// Close a document tab, balancing its resources and adjusting the active index.
+    func closeTab(_ doc: TableDocument) {
+        guard let i = documents.firstIndex(where: { $0 === doc }) else { return }
+        if doc.isExporting {
+            let alert = NSAlert()
+            alert.messageText = "An export is in progress"
+            alert.informativeText = "Closing this tab will cancel the current export. Continue?"
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "Close Anyway")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+        doc.close()
+        documents.remove(at: i)
+        if documents.isEmpty {
+            activeIndex = 0
+        } else {
+            if i < activeIndex { activeIndex -= 1 }
+            activeIndex = min(activeIndex, documents.count - 1)
         }
     }
 

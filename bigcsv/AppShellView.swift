@@ -11,7 +11,14 @@ struct AppShellView: View {
     var body: some View {
         Group {
             if let document = appModel.document {
-                DocumentView(document: document)
+                VStack(spacing: 0) {
+                    if appModel.documents.count > 1 {
+                        TabBarView()
+                        Divider()
+                    }
+                    DocumentView(document: document)
+                        .id(document.id)        // fresh document view per active tab
+                }
             } else {
                 EmptyStateView(onOpen: { appModel.presentOpenPanel() },
                                recentFiles: appModel.recentFiles,
@@ -42,6 +49,65 @@ struct AppShellView: View {
         .sheet(item: $purchase.paywallContext) { context in
             PaywallView(purchase: purchase, feature: context.feature)
         }
+    }
+}
+
+/// Tab strip for multiple open files (Pro). Shown only when more than one document
+/// is open; click to switch, × to close, + to open another.
+struct TabBarView: View {
+    @EnvironmentObject var appModel: AppModel
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 0) {
+                ForEach(Array(appModel.documents.enumerated()), id: \.element.id) { index, doc in
+                    TabItem(title: doc.fileURL.lastPathComponent,
+                            isActive: index == appModel.activeIndex,
+                            onSelect: { appModel.activeIndex = index },
+                            onClose: { appModel.closeTab(doc) })
+                    Divider().frame(height: 18)
+                }
+                Button { appModel.presentOpenPanel() } label: {
+                    Image(systemName: "plus").frame(width: 28, height: 28)
+                }
+                .buttonStyle(.borderless)
+                .help("Open another file in a new tab")
+                Spacer(minLength: 0)
+            }
+        }
+        .frame(height: 30)
+        .background(.bar)
+    }
+}
+
+private struct TabItem: View {
+    let title: String
+    let isActive: Bool
+    let onSelect: () -> Void
+    let onClose: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(title)
+                .lineLimit(1)
+                .font(.callout)
+                .foregroundStyle(isActive ? Color.primary : .secondary)
+            Button(action: onClose) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .opacity(hovering || isActive ? 1 : 0)
+            }
+            .buttonStyle(.borderless)
+            .help("Close tab")
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 30)
+        .frame(maxWidth: 220)
+        .background(isActive ? Color(nsColor: .controlBackgroundColor) : Color.clear)
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onSelect)
+        .onHover { hovering = $0 }
     }
 }
 

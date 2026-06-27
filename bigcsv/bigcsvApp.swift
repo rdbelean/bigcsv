@@ -55,6 +55,11 @@ struct bigcsvApp: App {
                     }
                 }
                 .disabled(appModel.recentFiles.isEmpty)
+                Button("Close Tab") {
+                    if let doc = appModel.document { appModel.closeTab(doc) }
+                }
+                .keyboardShortcut("w", modifiers: .command)
+                .disabled(appModel.document == nil)
             }
             CommandGroup(after: .importExport) {
                 Button("Export…") {

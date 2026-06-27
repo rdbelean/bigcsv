@@ -9,7 +9,9 @@ import Combine
 /// All UI-facing state is `@MainActor`; the heavy indexing runs off-main inside
 /// `LineIndexer` (a `nonisolated` core type) and publishes back here in batches.
 @MainActor
-final class TableDocument: ObservableObject {
+final class TableDocument: ObservableObject, Identifiable {
+
+    nonisolated var id: ObjectIdentifier { ObjectIdentifier(self) }
 
     let fileURL: URL
     let fileSize: Int
