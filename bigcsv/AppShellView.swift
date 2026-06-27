@@ -129,7 +129,11 @@ struct DocumentView: View {
             }
             Button("OK", role: .cancel) { document.lastExportURL = nil }
         } message: {
-            Text("Exported to “\(document.lastExportURL?.lastPathComponent ?? "")”.")
+            Text("Exported to “\(document.lastExportURL?.lastPathComponent ?? "")”."
+                 + (document.exportTruncated
+                    ? "\n\nNote: the view exceeds Excel’s \(XLSXExporter.maxRows.formatted())-row "
+                      + "limit, so it was truncated. Use CSV to export every row."
+                    : ""))
         }
         .alert("Export failed",
                isPresented: Binding(get: { document.exportError != nil },
@@ -445,7 +449,7 @@ struct StatusBarView: View {
 struct ExportSheet: View {
     @ObservedObject var document: TableDocument
     @Environment(\.dismiss) private var dismiss
-    @State private var format: ExportEngine.Format = .csv
+    @State private var format: SheetExportFormat = .csv
     @State private var includeHeader = true
 
     var body: some View {
@@ -467,13 +471,17 @@ struct ExportSheet: View {
                      + (document.filterSet.isEmpty ? "" : " (filtered)") + ".")
                     .font(.callout).foregroundStyle(.secondary)
                 Picker("Format", selection: $format) {
-                    Text("CSV").tag(ExportEngine.Format.csv)
-                    Text("TSV").tag(ExportEngine.Format.tsv)
-                    Text("JSON").tag(ExportEngine.Format.json)
+                    ForEach(SheetExportFormat.allCases) { f in Text(f.label).tag(f) }
                 }
                 .pickerStyle(.segmented)
-                if format != .json {
+                if format.supportsHeaderToggle {
                     Toggle("Include header row", isOn: $includeHeader)
+                }
+                if format == .xlsx && document.exportableRowCount > XLSXExporter.maxRows {
+                    Label("Excel allows \(XLSXExporter.maxRows.formatted()) rows — the rest "
+                          + "won’t be included. Use CSV for the full view.",
+                          systemImage: "exclamationmark.triangle")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 HStack {
                     Spacer()
@@ -485,7 +493,7 @@ struct ExportSheet: View {
             }
         }
         .padding(20)
-        .frame(width: 400)
+        .frame(width: 420)
         // The document dismisses this sheet (via exportSheetVisible) when an export
         // finishes, then presents the result alert — so no onChange dismiss here.
     }
@@ -509,16 +517,36 @@ struct ExportSheet: View {
             alert.runModal()
             return
         }
-        document.beginExport(to: url, format: format, includeHeader: includeHeader)
+        if let engineFormat = format.engineFormat {
+            document.beginExport(to: url, format: engineFormat, includeHeader: includeHeader)
+        } else {
+            document.beginExportXLSX(to: url, includeHeader: includeHeader)
+        }
     }
 }
 
-private extension ExportEngine.Format {
-    var fileExtension: String {
+/// The export formats offered in the UI (CSV/TSV/JSON go through `ExportEngine`;
+/// Excel goes through `XLSXExporter`).
+enum SheetExportFormat: String, CaseIterable, Identifiable {
+    case csv, tsv, json, xlsx
+    var id: String { rawValue }
+
+    var label: String {
         switch self {
-        case .csv: return "csv"
-        case .tsv: return "tsv"
-        case .json: return "json"
+        case .csv: return "CSV"
+        case .tsv: return "TSV"
+        case .json: return "JSON"
+        case .xlsx: return "Excel"
+        }
+    }
+    var fileExtension: String { rawValue }
+    var supportsHeaderToggle: Bool { self != .json }
+    var engineFormat: ExportEngine.Format? {
+        switch self {
+        case .csv: return .csv
+        case .tsv: return .tsv
+        case .json: return .json
+        case .xlsx: return nil
         }
     }
     var utType: UTType {
@@ -526,6 +554,7 @@ private extension ExportEngine.Format {
         case .csv: return .commaSeparatedText
         case .tsv: return .tabSeparatedText
         case .json: return .json
+        case .xlsx: return UTType(filenameExtension: "xlsx") ?? .data
         }
     }
 }

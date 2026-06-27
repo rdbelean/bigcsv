@@ -63,6 +63,8 @@ final class TableDocument: ObservableObject {
     @Published var lastExportURL: URL?
     /// Set on a failed export (drives an error alert). Nil while idle.
     @Published var exportError: String?
+    /// True when the last successful export was truncated (XLSX row/column limit).
+    @Published var exportTruncated = false
 
     /// Invoked (coalesced by the table view) whenever the indexed row count grows.
     var onIndexUpdate: (() -> Void)?
@@ -638,10 +640,46 @@ final class TableDocument: ObservableObject {
             order: projection.order)
     }
 
-    /// Export the current view to `url`. Cancellable; on failure or cancellation the
-    /// partial file is removed. Publishes progress and a completion result.
+    /// The current view as a reusable row source (shared by the XLSX exporter).
+    private func buildRowSource() -> ExportRowSource {
+        ExportRowSource(
+            mapper: mapper, dialect: dialect,
+            subsetOffsets: filterOffsets, order: projection.order,
+            recordOffset: dialect.hasHeader ? 1 : 0, rowCount: projection.totalRows)
+    }
+
+    /// Export the current view to a CSV/TSV/JSON file.
     func beginExport(to url: URL, format: ExportEngine.Format, includeHeader: Bool) {
         guard canExport else { return }
+        let request = buildExportRequest(format: format, includeHeader: includeHeader)
+        let mapper = self.mapper
+        let dialect = self.dialect
+        runExport(to: url) { progress in
+            try await ExportEngine().export(mapper: mapper, dialect: dialect, request: request, to: url,
+                                            onProgress: { fraction, _ in progress(fraction) })
+            return false   // text export never truncates
+        }
+    }
+
+    /// Export the current view to a hand-built `.xlsx` workbook (Excel's row/column
+    /// limit may truncate; that's reported back to the success alert).
+    func beginExportXLSX(to url: URL, includeHeader: Bool) {
+        guard canExport else { return }
+        let source = buildRowSource()
+        let columns = columnTitles
+        runExport(to: url) { progress in
+            let result = try await XLSXExporter().export(
+                source: source, columns: columns, includeHeader: includeHeader, to: url,
+                onProgress: { fraction, _ in progress(fraction) })
+            return result.truncated
+        }
+    }
+
+    /// Shared export task wrapper: progress + generation guard + partial-file cleanup
+    /// + sequenced sheet-dismiss/alert. `work` performs the format-specific streaming
+    /// and returns whether the output was truncated.
+    private func runExport(to url: URL,
+                           _ work: @escaping @Sendable (@escaping @Sendable (Double) -> Void) async throws -> Bool) {
         exportTask?.cancel()
         exportGeneration += 1
         let generation = exportGeneration
@@ -649,33 +687,33 @@ final class TableDocument: ObservableObject {
         exportProgress = 0
         exportError = nil
         lastExportURL = nil
-        let request = buildExportRequest(format: format, includeHeader: includeHeader)
-        let mapper = self.mapper
-        let dialect = self.dialect
+        exportTruncated = false
+
+        let progress: @Sendable (Double) -> Void = { fraction in
+            Task { @MainActor [weak self] in
+                guard let self, generation == self.exportGeneration else { return }
+                self.exportProgress = fraction
+            }
+        }
 
         exportTask = Task {
             do {
-                try await ExportEngine().export(
-                    mapper: mapper, dialect: dialect, request: request, to: url,
-                    onProgress: { fraction, _ in
-                        Task { @MainActor [weak self] in
-                            guard let self, generation == self.exportGeneration else { return }
-                            self.exportProgress = fraction
-                        }
-                    })
+                let truncated = try await work(progress)
                 await MainActor.run { [weak self] in
-                    self?.finishExport(generation: generation, url: url, error: nil, userCancelled: false)
+                    self?.finishExport(generation: generation, url: url, error: nil,
+                                       userCancelled: false, truncated: truncated)
                 }
             } catch is CancellationError {
                 try? FileManager.default.removeItem(at: url)
                 await MainActor.run { [weak self] in
-                    self?.finishExport(generation: generation, url: nil, error: nil, userCancelled: true)
+                    self?.finishExport(generation: generation, url: nil, error: nil,
+                                       userCancelled: true, truncated: false)
                 }
             } catch {
                 try? FileManager.default.removeItem(at: url)
                 await MainActor.run { [weak self] in
                     self?.finishExport(generation: generation, url: nil,
-                                       error: error.localizedDescription, userCancelled: false)
+                                       error: error.localizedDescription, userCancelled: false, truncated: false)
                 }
             }
         }
@@ -693,7 +731,8 @@ final class TableDocument: ObservableObject {
     /// stomping live UI state. On a real finish we dismiss the sheet first and
     /// publish the result on the next runloop tick, so the success/failure alert
     /// presents after the sheet is gone (avoids a same-frame sheet↔alert clash).
-    private func finishExport(generation: Int, url: URL?, error: String?, userCancelled: Bool) {
+    private func finishExport(generation: Int, url: URL?, error: String?,
+                              userCancelled: Bool, truncated: Bool) {
         guard generation == exportGeneration else { return }
         isExporting = false
         exportProgress = url == nil ? 0 : 1
@@ -702,6 +741,7 @@ final class TableDocument: ObservableObject {
         let resultURL = url, resultError = error
         Task { @MainActor [weak self] in
             guard let self, generation == self.exportGeneration else { return }
+            self.exportTruncated = truncated
             self.lastExportURL = resultURL
             self.exportError = resultError
         }

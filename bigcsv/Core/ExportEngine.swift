@@ -68,10 +68,6 @@ public nonisolated struct ExportEngine: Sendable {
         let handle = try FileHandle(forWritingTo: url)
         defer { try? handle.close() }
 
-        let bytes = mapper.bytes
-        let n = bytes.count
-        let srcDelimiter = dialect.delimiter.byte
-        let quote = dialect.quote
         let outDelimiter: UInt8 = request.format == .tsv ? 0x09 : 0x2C   // tab vs comma (json ignores)
         let columns = request.columns
         let json = request.format == .json
@@ -86,10 +82,11 @@ public nonisolated struct ExportEngine: Sendable {
             }
         }
 
-        // Resolve the ordered offset list (nil ⇒ pure sequential streaming).
-        let orderedOffsets = try collectOrderedOffsets(request: request, bytes: bytes, n: n,
-                                                        srcDelimiter: srcDelimiter, quote: quote)
-        let total = orderedOffsets?.count ?? max(0, request.rowCount)
+        let source = ExportRowSource(
+            mapper: mapper, dialect: dialect,
+            subsetOffsets: request.subsetOffsets, order: request.order,
+            recordOffset: request.recordOffset, rowCount: request.rowCount)
+        let total = source.displayCount
 
         // ── Preamble ─────────────────────────────────────────────────────────
         if json {
@@ -99,7 +96,7 @@ public nonisolated struct ExportEngine: Sendable {
         }
 
         var written = 0
-        func emit(_ fields: [String]) throws {
+        try await source.forEach { _, fields in
             if json {
                 if written > 0 { out.append(0x2C); out.append(0x0A) }   // ",\n"
                 Self.appendJSONObject(fields, columns: columns, into: &out)
@@ -108,92 +105,15 @@ public nonisolated struct ExportEngine: Sendable {
             }
             written += 1
             if written & 0x3FF == 0 {
-                if Task.isCancelled { throw CancellationError() }
                 onProgress(Double(written) / Double(max(1, total)), false)
             }
             try flush(force: false)   // cheap no-op until the buffer reaches the threshold
-        }
-
-        // ── Body ─────────────────────────────────────────────────────────────
-        if let offsets = orderedOffsets {
-            for off in offsets {
-                if Task.isCancelled { throw CancellationError() }
-                guard off >= 0, off < n else { try emit([]); continue }
-                let next = RecordScanner.nextRecordStart(bytes, from: off, delimiter: srcDelimiter, quote: quote)
-                try emit(CSVParser.parseRecord(
-                    UnsafeRawBufferPointer(rebasing: bytes[off..<min(next, n)]), dialect: dialect))
-            }
-        } else {
-            // Sequential: skip the BOM + header/leading records, then stream rowCount rows.
-            var pos = RecordScanner.utf8BOMLength(bytes)
-            var skipped = 0
-            while skipped < request.recordOffset && pos < n {
-                pos = RecordScanner.nextRecordStart(bytes, from: pos, delimiter: srcDelimiter, quote: quote)
-                skipped += 1
-            }
-            var d = 0
-            while pos < n && d < request.rowCount {
-                if Task.isCancelled { throw CancellationError() }
-                let next = RecordScanner.nextRecordStart(bytes, from: pos, delimiter: srcDelimiter, quote: quote)
-                try emit(CSVParser.parseRecord(
-                    UnsafeRawBufferPointer(rebasing: bytes[pos..<min(next, n)]), dialect: dialect))
-                pos = next
-                d += 1
-            }
         }
 
         // ── Postamble ────────────────────────────────────────────────────────
         if json { out.append(0x0A); out.append(0x5D); out.append(0x0A) }   // "\n]\n"
         try flush(force: true)
         onProgress(1, true)
-    }
-
-    /// Builds the offset list to iterate, in display order, or nil for the pure
-    /// sequential (unfiltered + unsorted) case. Cancellable.
-    private func collectOrderedOffsets(request: Request,
-                                       bytes: UnsafeRawBufferPointer, n: Int,
-                                       srcDelimiter: UInt8, quote: UInt8) throws -> [Int]? {
-        switch (request.subsetOffsets, request.order) {
-        case (nil, nil):
-            return nil                                            // sequential
-
-        case let (subset?, order?):                               // filter + sort
-            // One emitted row per displayed (filtered) position, mirroring
-            // RowProjection exactly: position p → subset index `order[p]` (identity
-            // for any tail beyond a short/raced permutation) → byte offset. An
-            // out-of-range index yields -1, which the body turns into an empty row
-            // rather than trapping.
-            return (0..<subset.count).map { p in
-                let i = p < order.count ? Int(order[p]) : p
-                return i >= 0 && i < subset.count ? subset[i] : -1
-            }
-
-        case let (subset?, nil):                                  // filter only
-            return subset
-
-        case let (nil, order?):                                   // sort only — collect all offsets first
-            var all = [Int](); all.reserveCapacity(request.rowCount)
-            var pos = RecordScanner.utf8BOMLength(bytes)
-            var skipped = 0
-            while skipped < request.recordOffset && pos < n {
-                pos = RecordScanner.nextRecordStart(bytes, from: pos, delimiter: srcDelimiter, quote: quote)
-                skipped += 1
-            }
-            var d = 0
-            while pos < n && d < request.rowCount {
-                if Task.isCancelled { throw CancellationError() }
-                all.append(pos)
-                pos = RecordScanner.nextRecordStart(bytes, from: pos, delimiter: srcDelimiter, quote: quote)
-                d += 1
-            }
-            // One emitted row per displayed position. Identity fallback for any tail
-            // beyond a sort permutation that was taken before the index finished
-            // growing — so the export matches exactly what the table shows.
-            return (0..<all.count).map { p in
-                let i = p < order.count ? Int(order[p]) : p
-                return i >= 0 && i < all.count ? all[i] : -1
-            }
-        }
     }
 
     // MARK: Serialization (static + tested directly)
