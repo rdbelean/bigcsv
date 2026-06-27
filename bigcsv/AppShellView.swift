@@ -99,6 +99,15 @@ struct DocumentView: View {
                       : "Export (Pro)")
                 .disabled(!document.canExport)
             }
+            ToolbarItem {
+                Button {
+                    purchase.requireUnlock(.statistics) { document.statsSheetVisible = true }
+                } label: {
+                    Label("Statistics", systemImage: "chart.bar.xaxis")
+                }
+                .help(purchase.isUnlocked ? "Column statistics" : "Statistics (Pro)")
+                .disabled(!document.canComputeStats)
+            }
         }
         .sheet(isPresented: $appModel.showGoToRow) {
             GoToRowSheet(document: document)
@@ -117,6 +126,9 @@ struct DocumentView: View {
         }
         .sheet(isPresented: $document.exportSheetVisible) {
             ExportSheet(document: document)
+        }
+        .sheet(isPresented: $document.statsSheetVisible) {
+            StatisticsSheet(document: document)
         }
         .alert("Export complete",
                isPresented: Binding(get: { document.lastExportURL != nil },
@@ -555,6 +567,96 @@ enum SheetExportFormat: String, CaseIterable, Identifiable {
         case .tsv: return .tabSeparatedText
         case .json: return .json
         case .xlsx: return UTType(filenameExtension: "xlsx") ?? .data
+        }
+    }
+}
+
+/// Column statistics (Pro): pick a column, compute count / distinct and — for
+/// numeric columns — sum / mean / min / max / median over the current filtered view.
+struct StatisticsSheet: View {
+    @ObservedObject var document: TableDocument
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("Column Statistics").font(.headline)
+                Spacer()
+                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
+            }
+            Picker("Column", selection: Binding(
+                get: { document.statsColumn },
+                set: { document.computeStats(column: $0) })) {
+                ForEach(Array(document.columnTitles.enumerated()), id: \.offset) { i, title in
+                    Text(title.isEmpty ? "Column \(i + 1)" : title).tag(i)
+                }
+            }
+            if !document.filterSet.isEmpty {
+                Text("Over the filtered view (\(document.exportableRowCount.formatted()) rows).")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Divider()
+
+            if document.isComputingStats {
+                HStack(spacing: 8) {
+                    ProgressView(value: document.statsProgress).frame(width: 160)
+                    Text("Calculating… \(Int(document.statsProgress * 100))%")
+                        .foregroundStyle(.secondary).monospacedDigit()
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            } else if let s = document.currentStats {
+                StatsList(stats: s)
+            } else {
+                Text("Choose a column to see its statistics.")
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(20)
+        .frame(width: 380, height: 440)
+        .onAppear {
+            // Always recompute on open so the figures reflect the current filter.
+            document.computeStats(column: min(max(0, document.statsColumn),
+                                              max(0, document.columnCount - 1)))
+        }
+    }
+}
+
+private struct StatsList: View {
+    let stats: ColumnStats
+
+    var body: some View {
+        VStack(spacing: 8) {
+            StatRow("Rows", stats.total.formatted())
+            StatRow("Filled", stats.filled.formatted())
+            StatRow("Empty", stats.empty.formatted())
+            StatRow("Distinct", stats.distinctCount.formatted() + (stats.distinctCapped ? "+" : ""))
+            if stats.isNumeric {
+                Divider().padding(.vertical, 2)
+                StatRow("Numeric", stats.numericCount.formatted())
+                StatRow("Sum", num(stats.sum))
+                StatRow("Mean", num(stats.mean))
+                StatRow("Min", num(stats.minValue))
+                StatRow("Max", num(stats.maxValue))
+                StatRow("Median", stats.medianOmitted ? "— (too many values)" : num(stats.median))
+            }
+        }
+    }
+
+    private func num(_ d: Double?) -> String {
+        guard let d else { return "—" }
+        return d.formatted(.number.precision(.fractionLength(0...6)))
+    }
+}
+
+private struct StatRow: View {
+    let key: String, value: String
+    init(_ key: String, _ value: String) { self.key = key; self.value = value }
+    var body: some View {
+        HStack {
+            Text(key).foregroundStyle(.secondary)
+            Spacer()
+            Text(value).monospacedDigit()
         }
     }
 }

@@ -66,6 +66,13 @@ final class TableDocument: ObservableObject {
     /// True when the last successful export was truncated (XLSX row/column limit).
     @Published var exportTruncated = false
 
+    // Statistics
+    @Published var statsSheetVisible = false
+    @Published var statsColumn = 0
+    @Published private(set) var isComputingStats = false
+    @Published private(set) var statsProgress: Double = 0
+    @Published private(set) var currentStats: ColumnStats?
+
     /// Invoked (coalesced by the table view) whenever the indexed row count grows.
     var onIndexUpdate: (() -> Void)?
     /// Set by the table view; asks it to scroll a display row into view.
@@ -87,6 +94,8 @@ final class TableDocument: ObservableObject {
     private var filterTask: Task<Void, Never>?
     private var exportTask: Task<Void, Never>?
     private var exportGeneration = 0
+    private var statsTask: Task<Void, Never>?
+    private var statsGeneration = 0
     private var filterGeneration = 0
     private var lastFilterReload: TimeInterval = 0
     /// Maps visible positions to original rows (filter subset + sort order).
@@ -291,6 +300,11 @@ final class TableDocument: ObservableObject {
         exportGeneration += 1     // a superseded export's late completion must be ignored
         isExporting = false
         exportProgress = 0
+        statsTask?.cancel()
+        statsTask = nil
+        statsGeneration += 1
+        isComputingStats = false
+        currentStats = nil
         filterGeneration += 1
         projection.order = nil
         projection.base = nil
@@ -749,6 +763,61 @@ final class TableDocument: ObservableObject {
         }
     }
 
+    // MARK: Statistics
+
+    /// Stats are offered once indexing is complete, there are columns, and no filter
+    /// is still streaming (so they never reflect a partial filtered subset).
+    var canComputeStats: Bool { progress.isComplete && columnCount > 0 && !isFiltering }
+
+    /// Compute statistics for `column` over the current (filtered) view, off-main.
+    /// Generation-guarded so quickly switching columns can't let a stale result land.
+    func computeStats(column: Int) {
+        guard canComputeStats, column >= 0, column < columnCount else { return }
+        statsTask?.cancel()
+        statsGeneration += 1
+        let generation = statsGeneration
+        statsColumn = column
+        isComputingStats = true
+        statsProgress = 0
+        currentStats = nil
+
+        // Sort order is irrelevant to a column's statistics, so don't pay for it.
+        let source = ExportRowSource(
+            mapper: mapper, dialect: dialect,
+            subsetOffsets: filterOffsets, order: nil,
+            recordOffset: dialect.hasHeader ? 1 : 0, rowCount: projection.totalRows)
+
+        statsTask = Task {
+            do {
+                let stats = try await StatsEngine().compute(
+                    source: source, column: column,
+                    onProgress: { fraction in
+                        Task { @MainActor [weak self] in
+                            guard let self, generation == self.statsGeneration else { return }
+                            self.statsProgress = fraction
+                        }
+                    })
+                await MainActor.run { [weak self] in
+                    guard let self, generation == self.statsGeneration else { return }
+                    self.currentStats = stats
+                    self.isComputingStats = false
+                }
+            } catch {
+                await MainActor.run { [weak self] in
+                    guard let self, generation == self.statsGeneration else { return }
+                    self.isComputingStats = false
+                }
+            }
+        }
+    }
+
+    func cancelStats() {
+        statsTask?.cancel()
+        statsTask = nil
+        statsGeneration += 1
+        isComputingStats = false
+    }
+
     // MARK: File-change watch (guards against SIGBUS on truncation/replacement)
 
     private func startWatchingFile() {
@@ -787,6 +856,8 @@ final class TableDocument: ObservableObject {
         filterTask = nil
         exportTask?.cancel()
         exportTask = nil
+        statsTask?.cancel()
+        statsTask = nil
         stopWatchingFile()
         if securityScoped {
             fileURL.stopAccessingSecurityScopedResource()
