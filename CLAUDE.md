@@ -62,7 +62,7 @@ export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 - **Release universal:**
   `xcodebuild -project bigcsv.xcodeproj -scheme bigcsv -configuration Release -destination 'generic/platform=macOS' ARCHS="arm64 x86_64" ONLY_ACTIVE_ARCH=NO build`
   then `lipo -info <…>/bigcsv.app/Contents/MacOS/bigcsv` → expect `arm64 x86_64`.
-- **Entitlements check:** `codesign -d --entitlements - <…>/bigcsv.app` → expect app-sandbox + user-selected.read-only + bookmarks.app-scope.
+- **Entitlements check:** `codesign -d --entitlements - <…>/bigcsv.app` → expect app-sandbox + user-selected.read-write + bookmarks.app-scope.
 
 **Rules:**
 - Work in **vertical slices**. After each slice: `swift test` green AND clean `xcodebuild build`, then `git commit`.
@@ -78,7 +78,11 @@ export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 - [x] Phase 0 — scaffolding & config
 - [x] Phase 1 — open → mmap → index → first rows (CHECKPOINT 1 PASSED: 1.2 GB / 15M rows, instant open, smooth first-page scroll, correct quoted/embedded-newline/ragged parsing)
 - [x] Phase 2 — synthesized-scroll table (smooth over 80M+ rows, no crash) + delimiter/encoding detection + header toggle + full status bar + go-to-row (⌘L) + cell inspector + file-change detection (CHECKPOINT 2 PASSED)
-- [ ] Phase 3 — search + sort + column ops + recent files + dark mode (SHIPPABLE FREE)
-- Phase 4 (StoreKit unlock), Phase 5 (paid features), Phase 6 (signing/notarization/distribution) — later.
+- [x] Phase 3 — search + sort + column ops + recent files + dark mode (SHIPPABLE FREE)
+- [x] Phase 4 — StoreKit 2 unlock (`com.rdb.bigcsv.pro`) + paywall (`ProductView`); `BuildFlavor.isDirectFreeBuild` (DIRECT_BUILD) makes the Homebrew/direct build free.
+- [x] Phase 5 — paid features: filter, filter+sort compose, export (CSV/TSV/JSON), hand-rolled XLSX (0 deps), column statistics, freeze columns + jump-to-column, multiple tabs/multi-file, saved filters. All adversarially reviewed. (Needs GUI acceptance test — esp. XLSX-in-Excel and the freeze pane.)
+- [ ] Phase 6 — Developer ID signing + notarization + Homebrew release (Scripts/package-release.sh, Casks/bigcsv.rb, docs/RELEASE.md) + App Store distribution. Needs a "Developer ID Application" cert + notary credentials (user).
+
+Export needs `user-selected.read-WRITE` (already set in Config/bigcsv.entitlements) — read-only can't write the Save-panel file. Core shared row enumeration for both exporters lives in `ExportRowSource` (hardened: identity fallback + bounds checks).
 
 The full living plan is at `/Users/rdb/.claude/plans/you-are-building-a-cheerful-barto.md`.
